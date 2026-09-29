@@ -30,3 +30,20 @@ jobs:
       - name: Live repo smoke test
         continue-on-error: true
         run: swift run pantry-cli https://repo.chariz.com --ios 16.5 --scheme rootless
+
+  helper-deb:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install dpkg ldid
+
+      - name: Build helper .deb
+        run: ./packaging/build-helper-deb.sh
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: pantry-helper-deb
+          path: build/*.deb

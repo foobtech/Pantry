@@ -11,6 +11,7 @@ public struct Package: Hashable {
     public let author: String
     public let maintainer: String
     public let depends: [[Dependency]]
+    public let provides: [Dependency]
     public let filename: String
     public let size: Int
     public let sha256: String
@@ -34,6 +35,7 @@ public struct Package: Hashable {
         author = s["author"] ?? ""
         maintainer = s["maintainer"] ?? ""
         depends = Dependency.parseList((s["depends"] ?? "") + (s["pre-depends"].map { "," + $0 } ?? ""))
+        provides = Dependency.parseList(s["provides"] ?? "").flatMap { $0 }
         filename = s["filename"] ?? ""
         size = Int(s["size"] ?? "") ?? 0
         sha256 = s["sha256"] ?? ""
