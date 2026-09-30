@@ -40,7 +40,7 @@ jobs:
         run: brew install dpkg ldid
 
       - name: Build helper .deb
-        run: ./packaging/build-helper-deb.sh
+        run: bash packaging/build-helper-deb.sh
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
