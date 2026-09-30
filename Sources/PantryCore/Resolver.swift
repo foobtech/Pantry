@@ -48,6 +48,10 @@ public struct PackageIndex {
         }
     }
 
+    public func latest(_ identifier: String) -> Package? { byName[identifier]?.first }
+
+    public var allLatest: [Package] { byName.values.compactMap { $0.first } }
+
     public func candidates(for dep: Dependency) -> [Package] {
         let direct = (byName[dep.name] ?? []).filter { dep.isSatisfied(by: $0.version) }
         return direct + (providers[dep.name] ?? [])

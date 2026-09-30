@@ -1,0 +1,4 @@
+build/
+Pantry.xcodeproj/
+.build/
+.DS_Store

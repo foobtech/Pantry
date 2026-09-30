@@ -40,10 +40,27 @@ jobs:
         run: brew install dpkg ldid
 
       - name: Build helper .deb
-        run: bash packaging/build-helper-deb.sh
+        run: ./packaging/build-helper-deb.sh
 
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: pantry-helper-deb
+          path: build/*.deb
+
+  app-deb:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: brew install xcodegen ldid dpkg
+
+      - name: Build app .deb
+        run: bash packaging/build-app-deb.sh
+
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: pantry-app-deb
           path: build/*.deb
