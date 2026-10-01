@@ -72,9 +72,10 @@ final class PackageRowView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let h = bounds.height
-        let bw = GetButton.size.width
+        let bw = button.sizeThatFits(.zero).width
+        let bh = GetButton.size.height
         iconView.frame = CGRect(x: 0, y: (h - 60) / 2, width: 60, height: 60)
-        button.frame = CGRect(x: bounds.width - bw, y: (h - 30) / 2, width: bw, height: 30)
+        button.frame = CGRect(x: bounds.width - bw, y: (h - bh) / 2, width: bw, height: bh)
         let textX: CGFloat = 74
         let textW = max(40, bounds.width - textX - bw - 12)
         let th = min(titleLabel.sizeThatFits(CGSize(width: textW, height: 100)).height, 42)
@@ -206,9 +207,9 @@ final class FeatureCardView: UIView {
             titleLabel.frame = CGRect(x: 20, y: ah - 68 - 78, width: aw - 40, height: 30)
             subtitleLabel.frame = CGRect(x: 20, y: ah - 68 - 46, width: aw - 40, height: 38)
         }
-        let bw = GetButton.size.width
+        let bw = button.sizeThatFits(.zero).width
         smallIcon.frame = CGRect(x: 14, y: 12, width: 44, height: 44)
-        button.frame = CGRect(x: aw - 14 - bw, y: 19, width: bw, height: 30)
+        button.frame = CGRect(x: aw - 14 - bw, y: 20, width: bw, height: GetButton.size.height)
         let tw = max(40, aw - 68 - 14 - bw - 8)
         nameLabel.frame = CGRect(x: 68, y: 12, width: tw, height: 22)
         descLabel.frame = CGRect(x: 68, y: 34, width: tw, height: 20)

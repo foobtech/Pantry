@@ -6,21 +6,27 @@ final class MainTabController: UITabBarController {
     override func viewDidLoad() {
         super.viewDidLoad()
         viewControllers = [
-            nav(TodayController(), "Today", "sun.max"),
-            nav(CategoryController(.tweaks), "Tweaks", "slider.horizontal.3"),
-            nav(CategoryController(.apps), "Apps", "square.stack.3d.up"),
-            nav(CategoryController(.themes), "Themes", "paintbrush"),
-            nav(SearchController(), "Search", "magnifyingglass"),
+            nav(TodayController(), "Today", ["sun.max.fill"]),
+            nav(CategoryController(.tweaks), "Tweaks", ["puzzlepiece.fill", "gearshape.fill"]),
+            nav(CategoryController(.apps), "Apps", ["square.stack.3d.up.fill", "square.grid.2x2.fill"]),
+            nav(CategoryController(.themes), "Themes", ["paintbrush.fill", "paintpalette.fill"]),
+            nav(SearchController(), "Search", ["magnifyingglass"]),
         ]
         NotificationCenter.default.addObserver(self, selector: #selector(installFailed(_:)),
                                                name: .installFailed, object: nil)
     }
 
-    private func nav(_ root: UIViewController, _ title: String, _ symbol: String) -> UINavigationController {
+    /// `symbols` are tried in order (newer SF Symbols first); filled variants, like the App Store.
+    private func nav(_ root: UIViewController, _ title: String, _ symbols: [String]) -> UINavigationController {
         let nav = UINavigationController(rootViewController: root)
         nav.setNavigationBarHidden(true, animated: false)
         var image: UIImage?
-        if #available(iOS 13.0, *) { image = UIImage(systemName: symbol) }
+        if #available(iOS 13.0, *) {
+            let config = UIImage.SymbolConfiguration(weight: .semibold)
+            for name in symbols {
+                if let found = UIImage(systemName: name, withConfiguration: config) { image = found; break }
+            }
+        }
         nav.tabBarItem = UITabBarItem(title: title, image: image, tag: 0)
         return nav
     }
@@ -229,6 +235,7 @@ final class SearchController: BlockPageController, UISearchBarDelegate {
 final class ProductController: BlockPageController {
     override var hidesNavBar: Bool { false }
     private let pkg: Package
+    private var shots: [Screenshot] = []
 
     init(_ pkg: Package) {
         self.pkg = pkg
@@ -237,6 +244,15 @@ final class ProductController: BlockPageController {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        DepictionLoader.screenshots(for: pkg) { [weak self] found in
+            guard let self = self, !found.isEmpty else { return }
+            self.shots = found
+            self.rebuild()
+        }
+    }
 
     private func developer(_ raw: String) -> String {
         var name = raw
@@ -249,26 +265,25 @@ final class ProductController: BlockPageController {
         let store = Store.shared
         let size = pkg.size > 0 ? ByteCountFormatter.string(fromByteCount: Int64(pkg.size), countStyle: .file) : "\u{2014}"
         let dev = developer(pkg.author.isEmpty ? pkg.maintainer : pkg.author)
-        let category = Category.of(pkg).rawValue
         let source = store.sourceName(for: pkg)
         let deps = pkg.depends.compactMap { $0.first?.name }.filter { $0 != "firmware" }
 
         var blocks: [BlockView] = [
             ProductHeaderBlock(pkg),
             StatsBlock([
-                (caption: "Size", value: size, note: "on disk"),
-                (caption: "Version", value: pkg.version.raw, note: pkg.architecture),
-                (caption: "Category", value: category, note: pkg.section),
-                (caption: "Developer", value: dev, note: "Author"),
-                (caption: "Source", value: source, note: "Repository"),
+                (caption: "Size", value: size),
+                (caption: "Version", value: pkg.version.raw),
+                (caption: "Category", value: pkg.section),
+                (caption: "Developer", value: dev),
+                (caption: "Source", value: source),
             ]),
         ]
+        if !shots.isEmpty { blocks.append(ScreenshotsBlock(shots)) }
         let body = pkg.longDescription.isEmpty ? pkg.shortDescription : pkg.longDescription
         blocks.append(TextBlock(title: "Description", body: body))
         blocks.append(InfoBlock(title: "Information", rows: [
             ("Source", source),
             ("Identifier", pkg.identifier),
-            ("Section", pkg.section),
             ("Architecture", pkg.architecture),
             ("Depends", deps.isEmpty ? "None" : deps.joined(separator: ", ")),
         ]))

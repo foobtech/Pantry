@@ -7,18 +7,20 @@ enum GetState: Equatable {
 
 /// The App Store's pill: GET / UPDATE / INSTALLED, turning into a progress ring while working.
 final class GetButton: UIControl {
-    static let size = CGSize(width: 84, height: 30)
+    static let size = CGSize(width: 72, height: 28)
+    private static let font = UIFont.systemFont(ofSize: 12, weight: .bold)
 
     private let label = UILabel()
     private let track = CAShapeLayer()
     private let ring = CAShapeLayer()
+    // Not called `state`: UIControl already has a read-only `state`.
     private(set) var buttonState: GetState = .get
     var onDark = false { didSet { apply() } }
     var onTap: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: 13, weight: .bold)
+        label.font = GetButton.font
         label.textAlignment = .center
         addSubview(label)
         for l in [track, ring] {
@@ -33,8 +35,20 @@ final class GetButton: UIControl {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    override var intrinsicContentSize: CGSize { GetButton.size }
-    override func sizeThatFits(_ size: CGSize) -> CGSize { GetButton.size }
+    /// GET stays compact like the App Store; longer words get just enough room.
+    var preferredWidth: CGFloat {
+        func fit(_ text: String) -> CGFloat {
+            max(GetButton.size.width, ceil((text as NSString).size(withAttributes: [.font: GetButton.font]).width) + 24)
+        }
+        switch buttonState {
+        case .installed: return fit("INSTALLED")
+        case .update: return fit("UPDATE")
+        default: return GetButton.size.width
+        }
+    }
+
+    override var intrinsicContentSize: CGSize { CGSize(width: preferredWidth, height: GetButton.size.height) }
+    override func sizeThatFits(_ size: CGSize) -> CGSize { intrinsicContentSize }
 
     func set(_ new: GetState) {
         guard new != buttonState else { return }
@@ -72,7 +86,15 @@ final class GetButton: UIControl {
         CATransaction.setDisableActions(true)
         ring.strokeEnd = fraction
         CATransaction.commit()
+
+        invalidateIntrinsicContentSize()
         setNeedsLayout()
+        // Our width depends on the state, so the views that position us need to re-lay out.
+        var ancestor = superview
+        for _ in 0..<3 {
+            ancestor?.setNeedsLayout()
+            ancestor = ancestor?.superview
+        }
     }
 
     override func layoutSubviews() {
@@ -81,7 +103,7 @@ final class GetButton: UIControl {
         label.frame = bounds
         track.frame = bounds
         ring.frame = bounds
-        let d = min(bounds.height, 28)
+        let d = min(bounds.height, 26)
         let path = UIBezierPath(arcCenter: CGPoint(x: bounds.midX, y: bounds.midY), radius: d / 2 - 2,
                                 startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: true).cgPath
         track.path = path

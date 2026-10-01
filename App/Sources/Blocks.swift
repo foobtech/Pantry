@@ -4,6 +4,7 @@ import UIKit
 // so the same pages adapt from iPhone to iPad (1, 2 or 3 columns) without Auto Layout.
 
 class BlockView: UIView {
+    var spacingAfter: CGFloat = 10
     func height(forWidth width: CGFloat) -> CGFloat { 0 }
 }
 
@@ -22,7 +23,7 @@ final class BlockScrollView: UIScrollView {
         for b in blocks {
             let h = b.height(forWidth: bounds.width)
             b.frame = CGRect(x: 0, y: y, width: bounds.width, height: h)
-            y += h + 10
+            y += h + b.spacingAfter
         }
         let size = CGSize(width: bounds.width, height: y + 30)
         if contentSize != size { contentSize = size }
@@ -172,7 +173,7 @@ final class CardShelfBlock: BlockView {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     private func cardWidth(_ w: CGFloat) -> CGFloat {
-        let m = sideMargin(for: w), v = columnCount(for: w), gap: CGFloat = 16
+        let m = sideMargin(for: w), v = columnCount(for: w), gap: CGFloat = 20
         let peek: CGFloat = cards.count > v ? 34 : 0
         return (w - 2 * m - gap * CGFloat(v - 1) - peek) / CGFloat(v)
     }
@@ -184,7 +185,7 @@ final class CardShelfBlock: BlockView {
     override func layoutSubviews() {
         super.layoutSubviews()
         scroll.frame = bounds
-        let w = bounds.width, m = sideMargin(for: w), gap: CGFloat = 16, cw = cardWidth(w)
+        let w = bounds.width, m = sideMargin(for: w), gap: CGFloat = 20, cw = cardWidth(w)
         for (i, c) in cards.enumerated() {
             c.frame = CGRect(x: m + CGFloat(i) * (cw + gap), y: 0, width: cw, height: bounds.height)
         }
@@ -282,6 +283,7 @@ final class TodayHeroBlock: BlockView {
         self.listCard = ListCardView(label: "Our favourites", title: listTitle, packages: list)
         rowCount = list.count
         super.init(frame: .zero)
+        spacingAfter = 20
         addSubview(self.hero)
         if rowCount > 0 { addSubview(listCard) }
     }
@@ -324,6 +326,7 @@ final class TwoUpCardsBlock: BlockView {
         a = FeatureCardView(first, style: .inside, label: first.section)
         b = second.map { FeatureCardView($0, style: .inside, label: $0.section) }
         super.init(frame: .zero)
+        spacingAfter = 20
         addSubview(a)
         if let b = b { addSubview(b) }
     }
@@ -439,12 +442,10 @@ final class ProductHeaderBlock: BlockView {
     init(_ pkg: Package) {
         self.pkg = pkg
         super.init(frame: .zero)
-        icon.layer.cornerRadius = 27
         icon.clipsToBounds = true
         icon.contentMode = .scaleAspectFill
         icon.backgroundColor = Theme.fill
         titleLabel.text = pkg.name
-        titleLabel.font = .systemFont(ofSize: 30, weight: .bold)
         titleLabel.textColor = Theme.label
         titleLabel.numberOfLines = 2
         subtitleLabel.text = pkg.shortDescription
@@ -454,6 +455,7 @@ final class ProductHeaderBlock: BlockView {
         removeButton.setTitle("Remove", for: .normal)
         removeButton.setTitleColor(.red, for: .normal)
         removeButton.titleLabel?.font = .systemFont(ofSize: 15)
+        removeButton.contentHorizontalAlignment = .left
         removeButton.addTarget(self, action: #selector(removeTapped), for: .touchUpInside)
         button.onTap = { [weak self] in
             guard let self = self else { return }
@@ -468,38 +470,69 @@ final class ProductHeaderBlock: BlockView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private var showsRemove: Bool {
+        Store.shared.installed.version(of: pkg.identifier) != nil && Store.shared.progress[pkg.identifier] == nil
+    }
+
     @objc private func refreshState() {
-        let state = Store.shared.state(for: pkg)
-        button.set(state)
-        removeButton.isHidden = Store.shared.installed.version(of: pkg.identifier) == nil || Store.shared.progress[pkg.identifier] != nil
+        button.set(Store.shared.state(for: pkg))
+        removeButton.isHidden = !showsRemove
+        superview?.setNeedsLayout()
     }
 
     @objc private func removeTapped() { InstallFlow.remove(pkg, from: owningViewController) }
 
-    override func height(forWidth width: CGFloat) -> CGFloat { 152 }
+    private func iconSize(_ w: CGFloat) -> CGFloat { w < 420 ? 96 : 120 }
+
+    /// Remove sits beside the button when there's room, otherwise under the icon row.
+    private func removeFitsBeside(_ w: CGFloat) -> Bool {
+        let m = sideMargin(for: w)
+        let x = m + iconSize(w) + 16
+        return x + button.sizeThatFits(.zero).width + 12 + 64 <= w - m
+    }
+
+    override func height(forWidth width: CGFloat) -> CGFloat {
+        var h = 16 + iconSize(width) + 16
+        if showsRemove && !removeFitsBeside(width) { h += 34 }
+        return h
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let w = bounds.width, m = sideMargin(for: w)
-        icon.frame = CGRect(x: m, y: 16, width: 120, height: 120)
-        let x = m + 136, tw = max(60, w - x - m)
-        let th = min(titleLabel.sizeThatFits(CGSize(width: tw, height: 100)).height, 74)
-        titleLabel.frame = CGRect(x: x, y: 18, width: tw, height: th)
+        let w = bounds.width, m = sideMargin(for: w), size = iconSize(w)
+        icon.frame = CGRect(x: m, y: 16, width: size, height: size)
+        icon.layer.cornerRadius = size * 0.225
+
+        let x = m + size + 16, tw = max(60, w - x - m)
+        titleLabel.font = .systemFont(ofSize: w < 420 ? 24 : 30, weight: .bold)
+        let th = min(titleLabel.sizeThatFits(CGSize(width: tw, height: 200)).height, w < 420 ? 62 : 74)
+        titleLabel.frame = CGRect(x: x, y: 16, width: tw, height: th)
         let sh = min(subtitleLabel.sizeThatFits(CGSize(width: tw, height: 100)).height, 44)
-        subtitleLabel.frame = CGRect(x: x, y: 18 + th + 2, width: tw, height: sh)
-        button.frame = CGRect(x: x, y: 106, width: GetButton.size.width, height: 30)
-        removeButton.frame = CGRect(x: x + GetButton.size.width + 12, y: 106, width: 80, height: 30)
+        subtitleLabel.frame = CGRect(x: x, y: 16 + th + 2, width: tw, height: sh)
+
+        let bw = button.sizeThatFits(.zero).width, bh = GetButton.size.height
+        let by = 16 + size - bh
+        button.frame = CGRect(x: x, y: by, width: bw, height: bh)
+        if removeFitsBeside(w) {
+            removeButton.frame = CGRect(x: x + bw + 12, y: by, width: 70, height: bh)
+        } else {
+            removeButton.frame = CGRect(x: m, y: 16 + size + 6, width: 90, height: bh)
+        }
     }
 }
 
+/// Size / version / category / developer / source. Scrolls sideways when it doesn't fit, like the App Store.
 final class StatsBlock: BlockView {
-    private var cells: [(UILabel, UILabel, UILabel)] = []
+    private let scroll = UIScrollView()
+    private var cells: [(UILabel, UILabel)] = []
     private var lines: [CALayer] = []
 
-    init(_ items: [(caption: String, value: String, note: String)]) {
+    init(_ items: [(caption: String, value: String)]) {
         super.init(frame: .zero)
+        scroll.showsHorizontalScrollIndicator = false
+        addSubview(scroll)
         for item in items {
-            let cap = UILabel(), val = UILabel(), note = UILabel()
+            let cap = UILabel(), val = UILabel()
             cap.text = item.caption.uppercased()
             cap.font = .systemFont(ofSize: 11, weight: .bold)
             cap.textColor = Theme.secondaryText
@@ -508,35 +541,94 @@ final class StatsBlock: BlockView {
             val.textColor = Theme.label
             val.adjustsFontSizeToFitWidth = true
             val.minimumScaleFactor = 0.6
-            note.text = item.note
-            note.font = .systemFont(ofSize: 12)
-            note.textColor = Theme.secondaryText
-            for l in [cap, val, note] { l.textAlignment = .center; addSubview(l) }
-            cells.append((cap, val, note))
+            for l in [cap, val] { l.textAlignment = .center; scroll.addSubview(l) }
+            cells.append((cap, val))
         }
         for _ in 0..<max(0, items.count - 1) {
             let line = CALayer()
             line.backgroundColor = Theme.separator.cgColor
-            layer.addSublayer(line)
+            scroll.layer.addSublayer(line)
             lines.append(line)
         }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    override func height(forWidth width: CGFloat) -> CGFloat { 84 }
+    override func height(forWidth width: CGFloat) -> CGFloat { 72 }
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        scroll.frame = bounds
         let m = sideMargin(for: bounds.width)
-        let cw = (bounds.width - 2 * m) / CGFloat(max(cells.count, 1))
+        let cw = max(112, (bounds.width - 2 * m) / CGFloat(max(cells.count, 1)))
         for (i, c) in cells.enumerated() {
             let x = m + CGFloat(i) * cw
-            c.0.frame = CGRect(x: x + 4, y: 12, width: cw - 8, height: 14)
-            c.1.frame = CGRect(x: x + 6, y: 30, width: cw - 12, height: 26)
-            c.2.frame = CGRect(x: x + 4, y: 58, width: cw - 8, height: 16)
-            if i < lines.count { lines[i].frame = CGRect(x: x + cw, y: 14, width: 0.5, height: 56) }
+            c.0.frame = CGRect(x: x + 6, y: 12, width: cw - 12, height: 14)
+            c.1.frame = CGRect(x: x + 8, y: 32, width: cw - 16, height: 26)
+            if i < lines.count { lines[i].frame = CGRect(x: x + cw, y: 12, width: 0.5, height: 46) }
         }
+        scroll.contentSize = CGSize(width: 2 * m + CGFloat(cells.count) * cw, height: bounds.height)
+    }
+}
+
+/// "Preview": the package's screenshots, pulled from its Sileo depiction.
+final class ScreenshotsBlock: BlockView {
+    private let line = CALayer()
+    private let titleLabel = UILabel()
+    private let scroll = UIScrollView()
+    private var views: [UIImageView] = []
+    private var aspect: CGFloat
+
+    init(_ shots: [Screenshot]) {
+        aspect = shots.first?.aspect ?? 0.56
+        let known = shots.first?.aspect != nil
+        super.init(frame: .zero)
+        line.backgroundColor = Theme.separator.cgColor
+        layer.addSublayer(line)
+        titleLabel.text = "Preview"
+        titleLabel.font = .systemFont(ofSize: 22, weight: .bold)
+        titleLabel.textColor = Theme.label
+        addSubview(titleLabel)
+        scroll.showsHorizontalScrollIndicator = false
+        addSubview(scroll)
+        for shot in shots {
+            let iv = UIImageView()
+            iv.contentMode = .scaleAspectFill
+            iv.clipsToBounds = true
+            iv.layer.cornerRadius = 14
+            iv.layer.borderWidth = 0.5
+            iv.layer.borderColor = Theme.separator.cgColor
+            iv.backgroundColor = Theme.fill
+            scroll.addSubview(iv)
+            views.append(iv)
+            ImageLoader.load(shot.url) { [weak self, weak iv] image in
+                guard let self = self, let iv = iv, let image = image else { return }
+                iv.image = image
+                if !known, iv === self.views.first, image.size.height > 0 {
+                    self.aspect = min(max(image.size.width / image.size.height, 0.4), 1.8)
+                    self.setNeedsLayout()
+                }
+            }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private func imageHeight(_ w: CGFloat) -> CGFloat { w >= 700 ? 400 : 320 }
+
+    override func height(forWidth width: CGFloat) -> CGFloat { 52 + imageHeight(width) + 16 }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let w = bounds.width, m = sideMargin(for: w), h = imageHeight(w), gap: CGFloat = 12
+        line.frame = CGRect(x: m, y: 0, width: w - 2 * m, height: 0.5)
+        titleLabel.frame = CGRect(x: m, y: 14, width: w - 2 * m, height: 28)
+        scroll.frame = CGRect(x: 0, y: 52, width: w, height: h)
+        let iw = h * aspect
+        for (i, v) in views.enumerated() {
+            v.frame = CGRect(x: m + CGFloat(i) * (iw + gap), y: 0, width: iw, height: h)
+        }
+        scroll.contentSize = CGSize(width: 2 * m + CGFloat(views.count) * iw + CGFloat(max(0, views.count - 1)) * gap, height: h)
     }
 }
 
