@@ -12,7 +12,7 @@ final class GetButton: UIControl {
     private let label = UILabel()
     private let track = CAShapeLayer()
     private let ring = CAShapeLayer()
-    private(set) var state: GetState = .get
+    private(set) var buttonState: GetState = .get
     var onDark = false { didSet { apply() } }
     var onTap: (() -> Void)?
 
@@ -37,15 +37,15 @@ final class GetButton: UIControl {
     override func sizeThatFits(_ size: CGSize) -> CGSize { GetButton.size }
 
     func set(_ new: GetState) {
-        guard new != state else { return }
-        state = new
+        guard new != buttonState else { return }
+        buttonState = new
         apply()
     }
 
     private func apply() {
         var working = false
         var fraction: CGFloat = 0
-        if case .working(let f) = state {
+        if case .working(let f) = buttonState {
             working = true
             fraction = CGFloat(min(max(f, 0), 1))
         }
@@ -54,14 +54,14 @@ final class GetButton: UIControl {
         ring.isHidden = !working
         backgroundColor = working ? .clear : (onDark ? UIColor(white: 1, alpha: 0.28) : Theme.fill)
 
-        switch state {
+        switch buttonState {
         case .get: label.text = "GET"
         case .update: label.text = "UPDATE"
         case .installed: label.text = "INSTALLED"
         case .working: break
         }
         let tint = onDark ? UIColor.white : Theme.accent
-        if state == .installed {
+        if buttonState == .installed {
             label.textColor = onDark ? UIColor(white: 1, alpha: 0.75) : Theme.secondaryText
         } else {
             label.textColor = tint
@@ -89,6 +89,6 @@ final class GetButton: UIControl {
     }
 
     @objc private func tapped() {
-        if state == .get || state == .update { onTap?() }
+        if buttonState == .get || buttonState == .update { onTap?() }
     }
 }
