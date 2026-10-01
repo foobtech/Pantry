@@ -10,8 +10,8 @@ public enum DownloadError: Error, CustomStringConvertible {
         switch self {
         case .badURL: return "bad package URL"
         case .http(let c): return "download failed (HTTP \(c))"
-        case .hashMismatch(let e, let a): return "SHA-256 mismatch (expected \(e), got \(a))"
-        case .missingHash: return "repo gave no SHA-256 for this package"
+        case .hashMismatch: return "the download didn't match the repo's SHA-256, so it was discarded"
+        case .missingHash: return "the repo gave no SHA-256 for this package"
         }
     }
 }
@@ -27,18 +27,46 @@ public final class DebDownloader {
         self.session = session
     }
 
-    public func download(_ pkg: Package, from repo: Repo, completion: @escaping (Result<URL, Error>) -> Void) {
+    /// `progress` reports 0...1 for this one download (Apple platforms only).
+    public func download(_ pkg: Package, from repo: Repo, progress: ((Double) -> Void)? = nil,
+                         completion: @escaping (Result<URL, Error>) -> Void) {
         guard !pkg.filename.isEmpty, let url = URL(string: pkg.filename, relativeTo: repo.url)?.absoluteURL else {
             completion(.failure(DownloadError.badURL)); return
         }
         let safeVersion = pkg.version.raw.replacingOccurrences(of: ":", with: "%3a")
         let dest = cacheDir.appendingPathComponent("\(pkg.identifier)_\(safeVersion)_\(pkg.architecture).deb")
+        start(pkg, url, dest, attemptsLeft: 3, progress, completion)
+    }
 
+    private static func isTransient(_ error: Error?) -> Bool {
+        guard let error = error else { return false }
+        let ns = error as NSError
+        // -1005 connection lost, -1001 timed out, -1004 couldn't connect, -1200 TLS failure
+        return ns.domain == NSURLErrorDomain && [-1005, -1001, -1004, -1200].contains(ns.code)
+    }
+
+    private func start(_ pkg: Package, _ url: URL, _ dest: URL, attemptsLeft: Int,
+                       _ progress: ((Double) -> Void)?, _ completion: @escaping (Result<URL, Error>) -> Void) {
         var request = URLRequest(url: url)
         request.setValue("Pantry/0.1", forHTTPHeaderField: "User-Agent")
-        session.downloadTask(with: request) { tmp, resp, err in
+
+        #if canImport(Darwin)
+        var observation: NSKeyValueObservation?
+        #endif
+
+        let task = session.downloadTask(with: request) { tmp, resp, err in
+            #if canImport(Darwin)
+            observation?.invalidate()
+            observation = nil
+            #endif
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             guard let tmp = tmp, status == 200 else {
+                if attemptsLeft > 1, DebDownloader.isTransient(err) {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
+                        self.start(pkg, url, dest, attemptsLeft: attemptsLeft - 1, progress, completion)
+                    }
+                    return
+                }
                 completion(.failure(err ?? DownloadError.http(status))); return
             }
             do {
@@ -56,6 +84,15 @@ public final class DebDownloader {
             } catch {
                 completion(.failure(error))
             }
-        }.resume()
+        }
+
+        #if canImport(Darwin)
+        if let progress = progress {
+            observation = task.progress.observe(\.fractionCompleted, options: [.new]) { p, _ in
+                progress(p.fractionCompleted)
+            }
+        }
+        #endif
+        task.resume()
     }
 }

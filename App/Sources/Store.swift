@@ -1,140 +1,271 @@
 import UIKit
 
 extension Notification.Name {
-    static let storeChanged = Notification.Name("PantryStoreChanged")
+    static let storeChanged = Notification.Name("PantryStoreChanged")     // packages, repos, or installed set changed
+    static let stateChanged = Notification.Name("PantryStateChanged")     // install progress changed
+    static let installFailed = Notification.Name("PantryInstallFailed")
 }
 
-/// App-wide state: repos, the package index, what's installed, and the install queue.
+enum Category: String, CaseIterable {
+    case tweaks = "Tweaks", apps = "Apps", themes = "Themes"
+
+    static func of(_ pkg: Package) -> Category {
+        let s = pkg.section.lowercased()
+        if s.contains("theme") { return .themes }
+        if s.contains("tweak") || s.contains("addon") { return .tweaks }
+        return .apps
+    }
+}
+
+struct RepoStatus {
+    var count: Int
+    var error: String?
+}
+
+enum AddRepoResult { case added, invalid, duplicate }
+
+/// App-wide state: sources, the package index, what's installed, and install progress.
 final class Store {
     static let shared = Store()
 
     let device = DeviceProfile.current()
     private(set) var repos: [Repo] = []
     private(set) var repoByID: [String: Repo] = [:]
+    private(set) var status: [String: RepoStatus] = [:]
     private(set) var index: PackageIndex
     private(set) var installed = InstalledDatabase()
     private(set) var isLoading = false
-    private(set) var lastError: String?
+    private(set) var progress: [String: Double] = [:]
+
+    private var packages: [Package] = []
+    private var needsRefresh = false
+    private let defaultsKey = "com.foobtech.pantry.repos.v1"
 
     lazy var downloader = DebDownloader(cacheDir: URL(fileURLWithPath: "/var/mobile/Library/Caches/com.foobtech.pantry"))
     lazy var queue = InstallQueue(downloader: downloader, runner: SpawnRunner(device: device))
 
     private init() {
         index = PackageIndex(packages: [], device: device)
-        // Procursus suites are numbered by CoreFoundation version: iOS 15 = 1800, 16 = 1900, 17 = 2000.
-        let cf = ProcessInfo.processInfo.operatingSystemVersion.majorVersion * 100 + 300
-        let arch = device.scheme == .rootful ? "iphoneos-arm" : "iphoneos-arm64"
-        repos = [
-            Repo(url: URL(string: "https://apt.procurs.us/")!, suite: "\(arch)/\(cf)", components: ["main"]),
-            Repo(url: URL(string: "https://repo.chariz.com/")!),
-        ]
+        repos = loadRepos()
         for r in repos { repoByID[r.id] = r }
+        queue.onEvent = { [weak self] event in self?.handle(event) }
     }
 
-    func refresh() {
-        guard !isLoading else { return }
-        isLoading = true
-        lastError = nil
-        notify()
+    // MARK: Sources
 
-        let fetcher = RepoFetcher(device: device)
+    static func defaultRepos() -> [Repo] {
+        // Procursus suites are numbered by CoreFoundation version: iOS 15 = 1800, 16 = 1900, 17 = 2000.
+        let cf = ProcessInfo.processInfo.operatingSystemVersion.majorVersion * 100 + 300
+        return [
+            Repo(url: URL(string: "https://apt.procurs.us/")!, suite: "\(cf)", components: ["main"]),
+            Repo(url: URL(string: "https://repo.chariz.com/")!),
+        ]
+    }
+
+    private func loadRepos() -> [Repo] {
+        if let data = UserDefaults.standard.data(forKey: defaultsKey),
+           let saved = try? JSONDecoder().decode([Repo].self, from: data) { return saved }
+        return Store.defaultRepos()
+    }
+
+    private func saveRepos() {
+        if let data = try? JSONEncoder().encode(repos) { UserDefaults.standard.set(data, forKey: defaultsKey) }
+    }
+
+    /// Accepts "https://repo.example.com/" or the sources.list style "https://repo.example.com/ suite component".
+    static func parseRepo(_ text: String) -> Repo? {
+        let parts = text.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "\n" }).map(String.init)
+        guard var first = parts.first else { return nil }
+        if !first.contains("://") { first = "https://" + first }
+        guard let url = URL(string: first), url.host != nil else { return nil }
+        if parts.count >= 2 {
+            return Repo(url: url, suite: parts[1], components: parts.count > 2 ? Array(parts[2...]) : ["main"])
+        }
+        return Repo(url: url)
+    }
+
+    func addRepo(_ text: String) -> AddRepoResult {
+        guard let repo = Store.parseRepo(text) else { return .invalid }
+        if repoByID[repo.id] != nil { return .duplicate }
+        repos.append(repo)
+        repoByID[repo.id] = repo
+        saveRepos()
+        notifyData()
+        refresh()
+        return .added
+    }
+
+    func removeRepo(id: String) {
+        repos.removeAll { $0.id == id }
+        repoByID[id] = nil
+        status[id] = nil
+        packages.removeAll { $0.repoID == id }
+        saveRepos()
+        rebuildIndex()
+        notifyData()
+    }
+
+    func host(of repo: Repo) -> String { repo.url.host ?? repo.url.absoluteString }
+    func sourceName(for pkg: Package) -> String { repoByID[pkg.repoID].map { host(of: $0) } ?? "Unknown source" }
+
+    // MARK: Packages
+
+    func refresh() {
+        if isLoading { needsRefresh = true; return }
+        isLoading = true
+        notifyData()
+
+        let fetcher = RepoFetcher(device: device, decompressors: Decompressors(bzip2: Bzip2Decompressor()))
         let group = DispatchGroup()
         let lock = NSLock()
         var all: [Package] = []
-        var errors: [String] = []
+        var newStatus: [String: RepoStatus] = [:]
 
         for repo in repos {
             group.enter()
             fetcher.fetchPackages(from: repo) { result in
                 lock.lock()
                 switch result {
-                case .success(let packages): all += packages
-                case .failure(let error): errors.append("\(repo.url.host ?? repo.url.absoluteString): \(error)")
+                case .success(let pkgs):
+                    all += pkgs
+                    newStatus[repo.id] = RepoStatus(count: pkgs.count, error: nil)
+                case .failure(let error):
+                    newStatus[repo.id] = RepoStatus(count: 0, error: describe(error))
                 }
                 lock.unlock()
                 group.leave()
             }
         }
         group.notify(queue: .main) {
-            self.index = PackageIndex(packages: all, device: self.device)
+            self.packages = all
+            self.status = newStatus
             self.installed = InstalledDatabase.load(for: self.device)
-            self.lastError = errors.isEmpty ? nil : errors.joined(separator: "\n")
+            self.rebuildIndex()
             self.isLoading = false
-            self.notify()
+            self.notifyData()
+            if self.needsRefresh { self.needsRefresh = false; self.refresh() }
         }
     }
+
+    private func rebuildIndex() { index = PackageIndex(packages: packages, device: device) }
 
     func reloadInstalled() {
         installed = InstalledDatabase.load(for: device)
-        notify()
+        notifyData()
     }
 
-    func actionTitle(for pkg: Package) -> String {
-        guard let have = installed.version(of: pkg.identifier) else { return "GET" }
-        return have < pkg.version ? "UPDATE" : "INSTALLED"
+    func packages(in category: Category) -> [Package] {
+        index.allLatest.filter { Category.of($0) == category }
     }
 
-    private func notify() {
-        NotificationCenter.default.post(name: .storeChanged, object: nil)
+    /// A different, stable-for-the-day selection; packages with icons come first.
+    static func dailyPicks(_ pkgs: [Package], count: Int, salt: String = "") -> [Package] {
+        let day = String(Int(Date().timeIntervalSince1970 / 86400))
+        func score(_ p: Package) -> (Int, UInt64) {
+            (p.icon == nil ? 1 : 0, Theme.hash(p.identifier + day + salt))
+        }
+        return Array(pkgs.sorted { score($0) < score($1) }.prefix(count))
     }
+
+    var statusText: String {
+        if isLoading { return "Loading sources…" }
+        if repos.isEmpty { return "No sources yet.\nTap the profile button (top right) to add one." }
+        let errors = repos.compactMap { r in status[r.id]?.error.map { "\(host(of: r)): \($0)" } }
+        if !errors.isEmpty { return errors.joined(separator: "\n") }
+        return "No packages for this device yet."
+    }
+
+    // MARK: Install state
+
+    func state(for pkg: Package) -> GetState {
+        if let p = progress[pkg.identifier] { return .working(p) }
+        guard let have = installed.version(of: pkg.identifier) else { return .get }
+        return have < pkg.version ? .update : .installed
+    }
+
+    func beginInstall(_ plan: InstallPlan) {
+        for p in plan.toInstall { progress[p.identifier] = 0.03 }
+        notifyState()
+        queue.install(plan, repos: repoByID)
+    }
+
+    func remove(_ pkg: Package) {
+        progress[pkg.identifier] = 0.5
+        notifyState()
+        queue.remove(identifier: pkg.identifier)
+    }
+
+    private func handle(_ event: InstallEvent) {
+        switch event {
+        case .progress(let v):
+            for k in Array(progress.keys) { progress[k] = max(v, 0.03) }
+            notifyState()
+        case .finished:
+            progress = [:]
+            notifyState()
+            reloadInstalled()
+        case .failed(let message):
+            progress = [:]
+            notifyState()
+            NotificationCenter.default.post(name: .installFailed, object: nil, userInfo: ["message": message])
+        default:
+            break
+        }
+    }
+
+    private func notifyData() { DispatchQueue.main.async { NotificationCenter.default.post(name: .storeChanged, object: nil) } }
+    private func notifyState() { DispatchQueue.main.async { NotificationCenter.default.post(name: .stateChanged, object: nil) } }
 }
 
 enum InstallFlow {
-    static func alert(_ vc: UIViewController, _ title: String, _ message: String) {
+    static func alert(_ vc: UIViewController?, _ title: String, _ message: String) {
+        guard let vc = vc else { return }
         let a = UIAlertController(title: title, message: message, preferredStyle: .alert)
         a.addAction(UIAlertAction(title: "OK", style: .default))
-        vc.present(a, animated: true)
+        (vc.presentedViewController ?? vc).present(a, animated: true)
     }
 
-    static func install(_ pkg: Package, from vc: UIViewController) {
+    static func install(_ pkg: Package, from vc: UIViewController?) {
         let store = Store.shared
         let plan = Resolver.plan(installing: pkg, index: store.index, installed: store.installed)
         guard plan.isInstallable else {
-            alert(vc, "Can't install", "Missing dependencies:\n" + plan.unmet.joined(separator: "\n"))
+            alert(vc, "Can't install \(pkg.name)", "Missing dependencies:\n" + plan.unmet.joined(separator: "\n"))
             return
         }
         let others = plan.toInstall.filter { $0.identifier != pkg.identifier }.map { $0.name }
-        var message = "\(pkg.name) \(pkg.version)"
-        if !others.isEmpty { message += "\n\nAlso installing: " + others.joined(separator: ", ") }
-
-        let confirm = UIAlertController(title: "Install?", message: message, preferredStyle: .alert)
+        if others.isEmpty || vc == nil {
+            store.beginInstall(plan)
+            return
+        }
+        let confirm = UIAlertController(title: "Install \(pkg.name)?",
+                                        message: "This also installs: " + others.joined(separator: ", "),
+                                        preferredStyle: .alert)
         confirm.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        confirm.addAction(UIAlertAction(title: "Install", style: .default) { _ in
-            _ = progress(from: vc)
-            store.queue.install(plan, repos: store.repoByID)
-        })
-        vc.present(confirm, animated: true)
+        confirm.addAction(UIAlertAction(title: "Install", style: .default) { _ in store.beginInstall(plan) })
+        (vc?.presentedViewController ?? vc)?.present(confirm, animated: true)
     }
 
-    static func remove(_ pkg: Package, from vc: UIViewController) {
+    static func updateAll(_ pkgs: [Package], from vc: UIViewController?) {
+        let store = Store.shared
+        var merged = InstallPlan(toInstall: [], unmet: [])
+        var seen = Set<String>()
+        for pkg in pkgs {
+            let plan = Resolver.plan(installing: pkg, index: store.index, installed: store.installed)
+            merged.unmet += plan.unmet
+            for p in plan.toInstall where seen.insert(p.identifier).inserted { merged.toInstall.append(p) }
+        }
+        guard merged.isInstallable else {
+            alert(vc, "Can't update", "Missing dependencies:\n" + merged.unmet.joined(separator: "\n"))
+            return
+        }
+        store.beginInstall(merged)
+    }
+
+    static func remove(_ pkg: Package, from vc: UIViewController?) {
+        guard let vc = vc else { return }
         let confirm = UIAlertController(title: "Remove \(pkg.name)?", message: nil, preferredStyle: .alert)
         confirm.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        confirm.addAction(UIAlertAction(title: "Remove", style: .destructive) { _ in
-            _ = progress(from: vc)
-            Store.shared.queue.remove(identifier: pkg.identifier)
-        })
-        vc.present(confirm, animated: true)
-    }
-
-    private static func progress(from vc: UIViewController) -> UIAlertController {
-        let a = UIAlertController(title: "Working…", message: nil, preferredStyle: .alert)
-        vc.present(a, animated: true)
-        Store.shared.queue.onEvent = { [weak a] event in
-            guard let a = a else { return }
-            switch event {
-            case .downloading(let p): a.message = "Downloading \(p.name)…"
-            case .installing(let p): a.message = "Installing \(p.name)…"
-            case .refreshingIcons: a.message = "Refreshing icons…"
-            case .finished:
-                Store.shared.reloadInstalled()
-                a.dismiss(animated: true)
-            case .failed(let text):
-                Store.shared.reloadInstalled()
-                a.title = "Failed"
-                a.message = text
-                a.addAction(UIAlertAction(title: "OK", style: .default))
-            }
-        }
-        return a
+        confirm.addAction(UIAlertAction(title: "Remove", style: .destructive) { _ in Store.shared.remove(pkg) })
+        (vc.presentedViewController ?? vc).present(confirm, animated: true)
     }
 }

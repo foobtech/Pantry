@@ -8,6 +8,7 @@ public protocol PrivilegedRunner {
 public enum InstallEvent {
     case downloading(Package)
     case installing(Package)
+    case progress(Double)      // overall 0...1 across every download and install in the plan
     case refreshingIcons
     case finished
     case failed(String)
@@ -28,37 +29,51 @@ public final class InstallQueue {
     public func install(_ plan: InstallPlan, repos: [String: Repo]) {
         queue.async {
             guard plan.isInstallable else {
-                self.emit(.failed("Unmet dependencies: " + plan.unmet.joined(separator: ", ")))
+                self.emit(.failed("Missing dependencies: " + plan.unmet.joined(separator: ", ")))
                 return
             }
+            let n = max(plan.toInstall.count, 1)
+            var lastReported = -1.0
+            func report(_ value: Double) {
+                if value - lastReported >= 0.01 || value >= 1 {
+                    lastReported = value
+                    self.emit(.progress(value))
+                }
+            }
+
             var files: [(Package, URL)] = []
-            for pkg in plan.toInstall {
+            for (i, pkg) in plan.toInstall.enumerated() {
                 guard let repo = repos[pkg.repoID] else {
-                    self.emit(.failed("Unknown repo for \(pkg.name)")); return
+                    self.emit(.failed("\(pkg.name): its source was removed")); return
                 }
                 self.emit(.downloading(pkg))
                 let sem = DispatchSemaphore(value: 0)
                 var outcome: Result<URL, Error> = .failure(DownloadError.badURL)
-                self.downloader.download(pkg, from: repo) { outcome = $0; sem.signal() }
+                self.downloader.download(pkg, from: repo, progress: { f in
+                    report((Double(i) + f) / Double(2 * n))
+                }, completion: { outcome = $0; sem.signal() })
                 sem.wait()
                 switch outcome {
                 case .success(let url): files.append((pkg, url))
-                case .failure(let error): self.emit(.failed("\(pkg.name): \(error)")); return
+                case .failure(let error): self.emit(.failed("\(pkg.name): \(describe(error))")); return
                 }
+                report(Double(i + 1) / Double(2 * n))
             }
-            for (pkg, file) in files {
+            for (j, (pkg, file)) in files.enumerated() {
                 self.emit(.installing(pkg))
                 do {
                     let result = try self.runner.run(["install", file.path])
                     if result.status != 0 {
-                        self.emit(.failed("\(pkg.name): dpkg exited \(result.status)\n\(result.output)")); return
+                        self.emit(.failed("\(pkg.name): \(InstallQueue.tail(result.output, fallback: "install failed (code \(result.status))"))")); return
                     }
                 } catch {
-                    self.emit(.failed("\(pkg.name): \(error)")); return
+                    self.emit(.failed("\(pkg.name): \(describe(error))")); return
                 }
+                report(Double(n + j + 1) / Double(2 * n))
             }
             self.emit(.refreshingIcons)
             _ = try? self.runner.run(["uicache"])
+            report(1)
             self.emit(.finished)
         }
     }
@@ -68,15 +83,22 @@ public final class InstallQueue {
             do {
                 let result = try self.runner.run(["remove", identifier])
                 if result.status != 0 {
-                    self.emit(.failed("\(identifier): dpkg exited \(result.status)\n\(result.output)")); return
+                    self.emit(.failed("\(identifier): \(InstallQueue.tail(result.output, fallback: "remove failed (code \(result.status))"))")); return
                 }
                 self.emit(.refreshingIcons)
                 _ = try? self.runner.run(["uicache"])
                 self.emit(.finished)
             } catch {
-                self.emit(.failed("\(identifier): \(error)"))
+                self.emit(.failed("\(identifier): \(describe(error))"))
             }
         }
+    }
+
+    /// The end of dpkg's output is where the actual complaint is.
+    private static func tail(_ output: String, fallback: String) -> String {
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return fallback }
+        return trimmed.count > 300 ? "…" + String(trimmed.suffix(300)) : trimmed
     }
 
     private func emit(_ event: InstallEvent) {

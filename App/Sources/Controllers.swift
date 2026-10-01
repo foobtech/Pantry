@@ -7,245 +7,444 @@ final class MainTabController: UITabBarController {
         super.viewDidLoad()
         viewControllers = [
             nav(TodayController(), "Today", "sun.max"),
+            nav(CategoryController(.tweaks), "Tweaks", "slider.horizontal.3"),
+            nav(CategoryController(.apps), "Apps", "square.stack.3d.up"),
+            nav(CategoryController(.themes), "Themes", "paintbrush"),
             nav(SearchController(), "Search", "magnifyingglass"),
-            nav(UpdatesController(), "Updates", "arrow.down.circle"),
         ]
+        NotificationCenter.default.addObserver(self, selector: #selector(installFailed(_:)),
+                                               name: .installFailed, object: nil)
     }
 
     private func nav(_ root: UIViewController, _ title: String, _ symbol: String) -> UINavigationController {
         let nav = UINavigationController(rootViewController: root)
-        nav.navigationBar.prefersLargeTitles = true
+        nav.setNavigationBarHidden(true, animated: false)
         var image: UIImage?
         if #available(iOS 13.0, *) { image = UIImage(systemName: symbol) }
         nav.tabBarItem = UITabBarItem(title: title, image: image, tag: 0)
         return nav
     }
+
+    @objc private func installFailed(_ note: Notification) {
+        var message = (note.userInfo?["message"] as? String) ?? "Something went wrong."
+        if message.count > 400 { message = String(message.prefix(400)) + "…" }
+        InstallFlow.alert(self, "Couldn't finish", message)
+    }
 }
 
-// MARK: - Shared list
+// MARK: - Base page
 
-class PackageListController: UITableViewController {
-    var items: [Package] = []
-    var emptyMessage: String { "Nothing here yet" }
+/// A scrolling page made of blocks. Subclasses override `rebuild()`.
+class BlockPageController: UIViewController {
+    let scroll = BlockScrollView()
+    var hidesNavBar: Bool { true }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        tableView.register(PackageCell.self, forCellReuseIdentifier: PackageCell.reuseID)
-        tableView.rowHeight = UITableView.automaticDimension
-        tableView.estimatedRowHeight = 84
+        view.backgroundColor = Theme.background
+        scroll.frame = view.bounds
+        scroll.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        scroll.contentInsetAdjustmentBehavior = .always
+        scroll.alwaysBounceVertical = true
+        scroll.keyboardDismissMode = .onDrag
+        view.addSubview(scroll)
+
         let refresh = UIRefreshControl()
         refresh.addTarget(self, action: #selector(pull), for: .valueChanged)
-        refreshControl = refresh
-        NotificationCenter.default.addObserver(self, selector: #selector(storeChanged),
-                                               name: .storeChanged, object: nil)
+        scroll.refreshControl = refresh
+        NotificationCenter.default.addObserver(self, selector: #selector(dataChanged), name: .storeChanged, object: nil)
         rebuild()
     }
 
-    /// Subclasses set `items` here, then call `reloadTable()`.
-    func rebuild() { reloadTable() }
-
-    final func reloadTable() {
-        tableView.reloadData()
-        guard items.isEmpty else { tableView.backgroundView = nil; return }
-        let label = UILabel()
-        label.textAlignment = .center
-        label.numberOfLines = 0
-        label.textColor = Theme.secondaryText
-        let store = Store.shared
-        label.text = store.isLoading ? "Loading repos…" : (store.lastError ?? emptyMessage)
-        tableView.backgroundView = label
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        navigationController?.setNavigationBarHidden(hidesNavBar, animated: animated)
     }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { _ in self.scroll.setNeedsLayout() }, completion: nil)
+    }
+
+    func rebuild() {}
 
     @objc private func pull() { Store.shared.refresh() }
 
-    @objc private func storeChanged() {
-        if !Store.shared.isLoading { refreshControl?.endRefreshing() }
+    @objc private func dataChanged() {
+        if !Store.shared.isLoading { scroll.refreshControl?.endRefreshing() }
         rebuild()
-    }
-
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
-
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: PackageCell.reuseID, for: indexPath) as! PackageCell
-        let pkg = items[indexPath.row]
-        cell.configure(pkg, buttonTitle: Store.shared.actionTitle(for: pkg)) { [weak self] in
-            guard let self = self else { return }
-            InstallFlow.install(pkg, from: self)
-        }
-        return cell
-    }
-
-    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        tableView.deselectRow(at: indexPath, animated: true)
-        navigationController?.pushViewController(PackageDetailController(items[indexPath.row]), animated: true)
     }
 }
 
 // MARK: - Today
 
-final class TodayController: PackageListController {
-    override func viewDidLoad() {
-        title = "Today"
-        super.viewDidLoad()
+final class TodayController: BlockPageController {
+    override func rebuild() {
+        let f = DateFormatter()
+        f.dateFormat = "EEEE d MMMM"
+        var blocks: [BlockView] = [HeaderBlock(title: "Today", date: f.string(from: Date()).uppercased())]
+        let all = Store.shared.index.allLatest
+        if all.isEmpty {
+            blocks.append(MessageBlock(Store.shared.statusText))
+        } else {
+            let picks = Store.dailyPicks(all, count: 13)
+            if let hero = picks.first {
+                blocks.append(TodayHeroBlock(hero: hero, list: Array(picks.dropFirst().prefix(4)), listTitle: "Top picks today"))
+            }
+            var rest = Array(picks.dropFirst(5))
+            while rest.count >= 2 {
+                blocks.append(TwoUpCardsBlock(rest[0], rest[1]))
+                rest.removeFirst(2)
+            }
+            if let last = rest.first { blocks.append(TwoUpCardsBlock(last, nil)) }
+        }
+        scroll.blocks = blocks
+    }
+}
+
+// MARK: - Tweaks / Apps / Themes
+
+final class CategoryController: BlockPageController {
+    private let category: Category
+
+    init(_ category: Category) {
+        self.category = category
+        super.init(nibName: nil, bundle: nil)
+        title = category.rawValue
     }
 
-    override var emptyMessage: String { "No packages for this device yet" }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private func openList(_ title: String, _ pkgs: [Package]) {
+        navigationController?.pushViewController(ListController(title, pkgs), animated: true)
+    }
 
     override func rebuild() {
-        // A different, stable-for-the-day selection each day.
-        let day = UInt64(Date().timeIntervalSince1970 / 86400)
-        func score(_ s: String) -> UInt64 {
-            var h: UInt64 = 5381 &+ day
-            for b in s.utf8 { h = (h &* 33) &+ UInt64(b) }
-            return h
+        var blocks: [BlockView] = [HeaderBlock(title: category.rawValue)]
+        let pkgs = Store.shared.packages(in: category)
+        if pkgs.isEmpty {
+            blocks.append(MessageBlock(Store.shared.index.allLatest.isEmpty
+                                       ? Store.shared.statusText : "Nothing in \(category.rawValue) yet."))
+        } else {
+            blocks.append(CardShelfBlock(Store.dailyPicks(pkgs, count: 6), label: category == .themes ? "Theme" : "Featured"))
+            let picks = Store.dailyPicks(pkgs, count: 12, salt: "shelf")
+            blocks.append(SectionHeaderBlock(title: "Staff Picks", subtitle: "Fresh picks for today",
+                                             seeAll: { [weak self] in self?.openList("Staff Picks", picks) }))
+            blocks.append(RowShelfBlock(picks))
+            for repo in Store.shared.repos {
+                let items = pkgs.filter { $0.repoID == repo.id }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+                if items.isEmpty { continue }
+                let title = "From " + Store.shared.host(of: repo)
+                blocks.append(SectionHeaderBlock(title: title, seeAll: { [weak self] in self?.openList(title, items) }))
+                blocks.append(RowShelfBlock(Array(items.prefix(12))))
+            }
         }
-        items = Array(Store.shared.index.allLatest.sorted { score($0.identifier) < score($1.identifier) }.prefix(15))
-        reloadTable()
+        scroll.blocks = blocks
+    }
+}
+
+// MARK: - See All
+
+final class ListController: BlockPageController {
+    override var hidesNavBar: Bool { false }
+    private let packages: [Package]
+
+    init(_ title: String, _ packages: [Package]) {
+        self.packages = packages
+        super.init(nibName: nil, bundle: nil)
+        self.title = title
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func rebuild() {
+        scroll.blocks = [HeaderBlock(title: title ?? "", avatar: false), RowGridBlock(packages)]
     }
 }
 
 // MARK: - Search
 
-final class SearchController: PackageListController, UISearchResultsUpdating {
-    private let search = UISearchController(searchResultsController: nil)
+final class SearchController: BlockPageController, UISearchBarDelegate {
+    private let header = HeaderBlock(title: "Search")
+    private let searchBlock = SearchBarBlock()
     private var query = ""
 
-    override var emptyMessage: String { query.isEmpty ? "Search tweaks and apps" : "No results" }
-
     override func viewDidLoad() {
-        title = "Search"
+        searchBlock.bar.delegate = self
         super.viewDidLoad()
-        search.searchResultsUpdater = self
-        if #available(iOS 9.1, *) { search.obscuresBackgroundDuringPresentation = false }
-        navigationItem.searchController = search
-        definesPresentationContext = true
     }
 
-    func updateSearchResults(for searchController: UISearchController) {
-        query = (searchController.searchBar.text ?? "").lowercased()
+    override func rebuild() {
+        var blocks: [BlockView] = [header, searchBlock]
+        let all = Store.shared.index.allLatest
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if all.isEmpty {
+            blocks.append(MessageBlock(Store.shared.statusText))
+        } else if q.isEmpty {
+            let picks = Store.dailyPicks(all, count: 18, salt: "search")
+            blocks.append(SuggestionsBlock(terms: picks.prefix(6).map { $0.name }) { [weak self] term in self?.pick(term) })
+            blocks.append(SectionHeaderBlock(title: "Suggested"))
+            blocks.append(RowGridBlock(Array(picks.dropFirst(6).prefix(12))))
+        } else {
+            let hits = all.filter {
+                $0.name.lowercased().contains(q) || $0.identifier.lowercased().contains(q)
+                    || $0.shortDescription.lowercased().contains(q)
+            }.sorted { a, b in
+                let ap = a.name.lowercased().hasPrefix(q), bp = b.name.lowercased().hasPrefix(q)
+                if ap != bp { return ap }
+                return a.name.lowercased() < b.name.lowercased()
+            }
+            blocks.append(hits.isEmpty ? MessageBlock("No results for \u{201C}\(query)\u{201D}") : RowGridBlock(Array(hits.prefix(60))))
+        }
+        scroll.blocks = blocks
+    }
+
+    private func pick(_ term: String) {
+        searchBlock.bar.text = term
+        query = term
+        searchBlock.bar.resignFirstResponder()
         rebuild()
     }
 
-    override func rebuild() {
-        if query.isEmpty {
-            items = []
-        } else {
-            items = Array(Store.shared.index.allLatest
-                .filter { $0.name.lowercased().contains(query)
-                    || $0.identifier.lowercased().contains(query)
-                    || $0.shortDescription.lowercased().contains(query) }
-                .sorted { $0.name.lowercased() < $1.name.lowercased() }
-                .prefix(100))
-        }
-        reloadTable()
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        query = searchText
+        rebuild()
+    }
+
+    func searchBarTextDidBeginEditing(_ searchBar: UISearchBar) { searchBar.setShowsCancelButton(true, animated: true) }
+
+    func searchBarSearchButtonClicked(_ searchBar: UISearchBar) { searchBar.resignFirstResponder() }
+
+    func searchBarCancelButtonClicked(_ searchBar: UISearchBar) {
+        searchBar.text = ""
+        query = ""
+        searchBar.setShowsCancelButton(false, animated: true)
+        searchBar.resignFirstResponder()
+        rebuild()
     }
 }
 
-// MARK: - Updates
+// MARK: - Product page
 
-final class UpdatesController: PackageListController {
-    override var emptyMessage: String { "Everything is up to date" }
-
-    override func viewDidLoad() {
-        title = "Updates"
-        super.viewDidLoad()
-    }
-
-    override func rebuild() {
-        let store = Store.shared
-        items = store.installed.versions.compactMap { id, have -> Package? in
-            guard let latest = store.index.latest(id), latest.version > have else { return nil }
-            return latest
-        }.sorted { $0.name.lowercased() < $1.name.lowercased() }
-        reloadTable()
-    }
-}
-
-// MARK: - Detail
-
-final class PackageDetailController: UIViewController {
+final class ProductController: BlockPageController {
+    override var hidesNavBar: Bool { false }
     private let pkg: Package
 
     init(_ pkg: Package) {
         self.pkg = pkg
         super.init(nibName: nil, bundle: nil)
+        navigationItem.largeTitleDisplayMode = .never
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        view.backgroundColor = Theme.background
-        navigationItem.largeTitleDisplayMode = .never
-
-        let title = UILabel()
-        title.font = .systemFont(ofSize: 28, weight: .bold)
-        title.numberOfLines = 0
-        title.text = pkg.name
-
-        let meta = UILabel()
-        meta.font = .systemFont(ofSize: 14)
-        meta.textColor = Theme.secondaryText
-        meta.numberOfLines = 0
-        var line = "\(pkg.version) · \(pkg.section)"
-        let by = pkg.author.isEmpty ? pkg.maintainer : pkg.author
-        if !by.isEmpty { line += "\nby " + by }
-        meta.text = line
-
-        let summary = UILabel()
-        summary.font = .systemFont(ofSize: 17, weight: .medium)
-        summary.numberOfLines = 0
-        summary.text = pkg.shortDescription
-
-        let details = UILabel()
-        details.font = .systemFont(ofSize: 15)
-        details.numberOfLines = 0
-        details.text = pkg.longDescription
-
-        let action = UIButton(type: .system)
-        let actionTitle = Store.shared.actionTitle(for: pkg)
-        action.setTitle(actionTitle, for: .normal)
-        action.isEnabled = actionTitle != "INSTALLED"
-        action.titleLabel?.font = .systemFont(ofSize: 17, weight: .bold)
-        action.setTitleColor(.white, for: .normal)
-        action.setTitleColor(Theme.secondaryText, for: .disabled)
-        action.backgroundColor = action.isEnabled ? Theme.accent : Theme.fill
-        action.layer.cornerRadius = 14
-        action.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        action.addTarget(self, action: #selector(installTapped), for: .touchUpInside)
-
-        var views: [UIView] = [title, meta, action, summary, details]
-        if Store.shared.installed.version(of: pkg.identifier) != nil {
-            let remove = UIButton(type: .system)
-            remove.setTitle("Remove", for: .normal)
-            remove.setTitleColor(.red, for: .normal)
-            remove.addTarget(self, action: #selector(removeTapped), for: .touchUpInside)
-            views.insert(remove, at: 3)
-        }
-
-        let stack = UIStackView(arrangedSubviews: views)
-        stack.axis = .vertical
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        let scroll = UIScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.addSubview(stack)
-        view.addSubview(scroll)
-
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 20),
-            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -20),
-            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -20),
-            stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -40),
-        ])
+    private func developer(_ raw: String) -> String {
+        var name = raw
+        if let lt = name.firstIndex(of: "<") { name = String(name[name.startIndex..<lt]) }
+        name = name.trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Unknown" : name
     }
 
-    @objc private func installTapped() { InstallFlow.install(pkg, from: self) }
-    @objc private func removeTapped() { InstallFlow.remove(pkg, from: self) }
+    override func rebuild() {
+        let store = Store.shared
+        let size = pkg.size > 0 ? ByteCountFormatter.string(fromByteCount: Int64(pkg.size), countStyle: .file) : "\u{2014}"
+        let dev = developer(pkg.author.isEmpty ? pkg.maintainer : pkg.author)
+        let category = Category.of(pkg).rawValue
+        let source = store.sourceName(for: pkg)
+        let deps = pkg.depends.compactMap { $0.first?.name }.filter { $0 != "firmware" }
+
+        var blocks: [BlockView] = [
+            ProductHeaderBlock(pkg),
+            StatsBlock([
+                (caption: "Size", value: size, note: "on disk"),
+                (caption: "Version", value: pkg.version.raw, note: pkg.architecture),
+                (caption: "Category", value: category, note: pkg.section),
+                (caption: "Developer", value: dev, note: "Author"),
+                (caption: "Source", value: source, note: "Repository"),
+            ]),
+        ]
+        let body = pkg.longDescription.isEmpty ? pkg.shortDescription : pkg.longDescription
+        blocks.append(TextBlock(title: "Description", body: body))
+        blocks.append(InfoBlock(title: "Information", rows: [
+            ("Source", source),
+            ("Identifier", pkg.identifier),
+            ("Section", pkg.section),
+            ("Architecture", pkg.architecture),
+            ("Depends", deps.isEmpty ? "None" : deps.joined(separator: ", ")),
+        ]))
+        scroll.blocks = blocks
+    }
+}
+
+// MARK: - Account (updates + sources)
+
+/// The App Store keeps updates and account settings behind the profile button; Pantry does the same, plus sources.
+final class AccountController: UITableViewController {
+    private var updates: [Package] = []
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "Account"
+        navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done, target: self, action: #selector(done))
+        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "plain")
+        tableView.register(RowCell.self, forCellReuseIdentifier: "row")
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .storeChanged, object: nil)
+        reload()
+    }
+
+    @objc private func done() { dismiss(animated: true) }
+
+    @objc private func reload() {
+        let store = Store.shared
+        updates = store.installed.versions.compactMap { id, have -> Package? in
+            guard let latest = store.index.latest(id), latest.version > have else { return nil }
+            return latest
+        }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        tableView.reloadData()
+    }
+
+    // Sections: 0 updates, 1 sources, 2 about
+    override func numberOfSections(in tableView: UITableView) -> Int { 3 }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        ["Updates", "Sources", "About"][section]
+    }
+
+    private var updateRowCount: Int { updates.isEmpty ? 1 : updates.count + (updates.count > 1 ? 1 : 0) }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        switch section {
+        case 0: return updateRowCount
+        case 1: return Store.shared.repos.count + 1
+        default: return 3
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        if indexPath.section == 0, !updates.isEmpty, !(updates.count > 1 && indexPath.row == 0) { return PackageRowView.height }
+        return 48
+    }
+
+    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        let store = Store.shared
+        switch indexPath.section {
+        case 0:
+            if updates.isEmpty {
+                let cell = tableView.dequeueReusableCell(withIdentifier: "plain", for: indexPath)
+                cell.textLabel?.text = store.isLoading ? "Checking for updates…" : "Everything is up to date"
+                cell.textLabel?.textColor = Theme.secondaryText
+                cell.selectionStyle = .none
+                return cell
+            }
+            if updates.count > 1 && indexPath.row == 0 {
+                let cell = tableView.dequeueReusableCell(withIdentifier: "plain", for: indexPath)
+                cell.textLabel?.text = "Update All (\(updates.count))"
+                cell.textLabel?.textColor = Theme.accent
+                return cell
+            }
+            let cell = tableView.dequeueReusableCell(withIdentifier: "row", for: indexPath) as! RowCell
+            cell.configure(updates[indexPath.row - (updates.count > 1 ? 1 : 0)])
+            return cell
+        case 1:
+            let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+            if indexPath.row < store.repos.count {
+                let repo = store.repos[indexPath.row]
+                cell.textLabel?.text = store.host(of: repo) + (repo.isFlat ? "" : "  \(repo.suite)")
+                if let st = store.status[repo.id] {
+                    if let error = st.error {
+                        cell.detailTextLabel?.text = error
+                        cell.detailTextLabel?.textColor = .red
+                    } else {
+                        cell.detailTextLabel?.text = "\(st.count) packages"
+                        cell.detailTextLabel?.textColor = Theme.secondaryText
+                    }
+                } else {
+                    cell.detailTextLabel?.text = store.isLoading ? "Loading…" : "Not loaded yet"
+                    cell.detailTextLabel?.textColor = Theme.secondaryText
+                }
+                cell.selectionStyle = .none
+            } else {
+                cell.textLabel?.text = "Add Source\u{2026}"
+                cell.textLabel?.textColor = Theme.accent
+            }
+            return cell
+        default:
+            let cell = UITableViewCell(style: .value1, reuseIdentifier: nil)
+            cell.selectionStyle = .none
+            switch indexPath.row {
+            case 0:
+                cell.textLabel?.text = "Device"
+                cell.detailTextLabel?.text = "\(store.device.machine), iOS \(store.device.iOSVersion.raw)"
+            case 1:
+                cell.textLabel?.text = "Jailbreak"
+                cell.detailTextLabel?.text = "\(store.device.scheme.rawValue) (\(store.device.architectures.joined(separator: ", ")))"
+            default:
+                cell.textLabel?.text = "Installed packages"
+                cell.detailTextLabel?.text = "\(store.installed.versions.count)"
+            }
+            return cell
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+        tableView.deselectRow(at: indexPath, animated: true)
+        if indexPath.section == 0, updates.count > 1, indexPath.row == 0 {
+            InstallFlow.updateAll(updates, from: self)
+        } else if indexPath.section == 1, indexPath.row == Store.shared.repos.count {
+            promptAddSource()
+        }
+    }
+
+    override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
+        indexPath.section == 1 && indexPath.row < Store.shared.repos.count
+    }
+
+    override func tableView(_ tableView: UITableView, commit editingStyle: UITableViewCell.EditingStyle,
+                            forRowAt indexPath: IndexPath) {
+        guard editingStyle == .delete, indexPath.section == 1, indexPath.row < Store.shared.repos.count else { return }
+        Store.shared.removeRepo(id: Store.shared.repos[indexPath.row].id)
+    }
+
+    private func promptAddSource() {
+        let alert = UIAlertController(title: "Add Source",
+                                      message: "Enter a repo URL, or \u{201C}URL suite component\u{201D} for a Debian-style repo.",
+                                      preferredStyle: .alert)
+        alert.addTextField { field in
+            field.placeholder = "https://repo.example.com/"
+            field.keyboardType = .URL
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Add", style: .default) { [weak self] _ in
+            let text = alert.textFields?.first?.text ?? ""
+            switch Store.shared.addRepo(text) {
+            case .added: break
+            case .invalid: InstallFlow.alert(self, "Not a repo URL", "Try something like https://repo.example.com/")
+            case .duplicate: InstallFlow.alert(self, "Already added", "That source is already in your list.")
+            }
+        })
+        present(alert, animated: true)
+    }
+}
+
+/// Table cell that hosts a PackageRowView.
+final class RowCell: UITableViewCell {
+    private let row = PackageRowView()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        selectionStyle = .none
+        row.showsSeparator = false
+        contentView.addSubview(row)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(_ pkg: Package) { row.configure(pkg) }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        row.frame = contentView.bounds.insetBy(dx: 20, dy: 0)
+    }
 }

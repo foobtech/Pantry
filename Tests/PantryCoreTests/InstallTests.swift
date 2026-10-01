@@ -12,6 +12,15 @@ final class InstallTests: XCTestCase {
                        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
     }
 
+    func testRepoCodable() throws {
+        let repo = Repo(url: URL(string: "https://apt.example.com")!, suite: "1900", components: ["main"])
+        let data = try JSONEncoder().encode([repo])
+        let back = try JSONDecoder().decode([Repo].self, from: data)
+        XCTAssertEqual(back, [repo])
+        XCTAssertFalse(back[0].isFlat)
+        XCTAssertEqual(back[0].url.absoluteString, "https://apt.example.com/")
+    }
+
     func testInstalledDatabase() {
         let status = """
         Package: libfoo

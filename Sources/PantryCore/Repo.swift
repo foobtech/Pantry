@@ -1,6 +1,6 @@
 import Foundation
 
-public struct Repo: Hashable {
+public struct Repo: Hashable, Codable {
     public let url: URL            // base URL, always with a trailing slash
     public let suite: String       // "./" for flat (Cydia-style) repos
     public let components: [String]

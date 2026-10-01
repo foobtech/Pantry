@@ -62,6 +62,11 @@ public struct InstallPlan {
     public var toInstall: [Package]   // dependencies first
     public var unmet: [String]        // human-readable, e.g. "libfoo (>= 2.0) | libbar"
     public var isInstallable: Bool { unmet.isEmpty }
+
+    public init(toInstall: [Package], unmet: [String]) {
+        self.toInstall = toInstall
+        self.unmet = unmet
+    }
 }
 
 public enum Resolver {
