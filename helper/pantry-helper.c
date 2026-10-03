@@ -16,7 +16,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+// Rootless: "/var/jb". Rootful (iOS 12 era jailbreaks): "" (build with -DJBROOT=\"\").
+#ifndef JBROOT
 #define JBROOT "/var/jb"
+#endif
 #define DPKG JBROOT "/usr/bin/dpkg"
 #define UICACHE JBROOT "/usr/bin/uicache"
 #define SBRELOAD JBROOT "/usr/bin/sbreload"

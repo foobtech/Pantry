@@ -6,18 +6,18 @@ final class MainTabController: UITabBarController {
     override func viewDidLoad() {
         super.viewDidLoad()
         viewControllers = [
-            nav(TodayController(), "Today", ["sun.max.fill"]),
-            nav(CategoryController(.tweaks), "Tweaks", ["puzzlepiece.fill", "gearshape.fill"]),
-            nav(CategoryController(.apps), "Apps", ["square.stack.3d.up.fill", "square.grid.2x2.fill"]),
-            nav(CategoryController(.themes), "Themes", ["paintbrush.fill", "paintpalette.fill"]),
-            nav(SearchController(), "Search", ["magnifyingglass"]),
+            nav(TodayController(), "Today", ["sun.max.fill"], .today),
+            nav(CategoryController(.tweaks), "Tweaks", ["puzzlepiece.fill", "gearshape.fill"], .tweaks),
+            nav(CategoryController(.apps), "Apps", ["square.stack.3d.up.fill", "square.grid.2x2.fill"], .apps),
+            nav(CategoryController(.themes), "Themes", ["paintbrush.fill", "paintpalette.fill"], .themes),
+            nav(SearchController(), "Search", ["magnifyingglass"], .search),
         ]
         NotificationCenter.default.addObserver(self, selector: #selector(installFailed(_:)),
                                                name: .installFailed, object: nil)
     }
 
     /// `symbols` are tried in order (newer SF Symbols first); filled variants, like the App Store.
-    private func nav(_ root: UIViewController, _ title: String, _ symbols: [String]) -> UINavigationController {
+    private func nav(_ root: UIViewController, _ title: String, _ symbols: [String], _ kind: TabIcons.Kind) -> UINavigationController {
         let nav = UINavigationController(rootViewController: root)
         nav.setNavigationBarHidden(true, animated: false)
         var image: UIImage?
@@ -26,6 +26,8 @@ final class MainTabController: UITabBarController {
             for name in symbols {
                 if let found = UIImage(systemName: name, withConfiguration: config) { image = found; break }
             }
+        } else {
+            image = TabIcons.image(kind)
         }
         nav.tabBarItem = UITabBarItem(title: title, image: image, tag: 0)
         return nav
@@ -59,6 +61,7 @@ class BlockPageController: UIViewController {
         refresh.addTarget(self, action: #selector(pull), for: .valueChanged)
         scroll.refreshControl = refresh
         NotificationCenter.default.addObserver(self, selector: #selector(dataChanged), name: .storeChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(dataChanged), name: .paymentChanged, object: nil)
         rebuild()
     }
 
@@ -93,7 +96,11 @@ final class TodayController: BlockPageController {
         if all.isEmpty {
             blocks.append(MessageBlock(Store.shared.statusText))
         } else {
-            let picks = Store.dailyPicks(all, count: 13)
+            var picks = Store.shared.featuredPackages()
+            for p in Store.dailyPicks(all, count: 13) where !picks.contains(where: { $0.identifier == p.identifier }) {
+                picks.append(p)
+            }
+            picks = Array(picks.prefix(13))
             if let hero = picks.first {
                 blocks.append(TodayHeroBlock(hero: hero, list: Array(picks.dropFirst().prefix(4)), listTitle: "Top picks today"))
             }
@@ -132,7 +139,11 @@ final class CategoryController: BlockPageController {
             blocks.append(MessageBlock(Store.shared.index.allLatest.isEmpty
                                        ? Store.shared.statusText : "Nothing in \(category.rawValue) yet."))
         } else {
-            blocks.append(CardShelfBlock(Store.dailyPicks(pkgs, count: 6), label: category == .themes ? "Theme" : "Featured"))
+            var featured = Store.shared.featuredPackages(in: category)
+            for p in Store.dailyPicks(pkgs, count: 6) where !featured.contains(where: { $0.identifier == p.identifier }) {
+                featured.append(p)
+            }
+            blocks.append(CardShelfBlock(Array(featured.prefix(6)), label: category == .themes ? "Theme" : "Featured"))
             let picks = Store.dailyPicks(pkgs, count: 12, salt: "shelf")
             blocks.append(SectionHeaderBlock(title: "Staff Picks", subtitle: "Fresh picks for today",
                                              seeAll: { [weak self] in self?.openList("Staff Picks", picks) }))
@@ -247,9 +258,9 @@ final class ProductController: BlockPageController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        DepictionLoader.screenshots(for: pkg) { [weak self] found in
-            guard let self = self, !found.isEmpty else { return }
-            self.shots = found
+        DepictionLoader.depiction(for: pkg) { [weak self] depiction in
+            guard let self = self, !depiction.screenshots.isEmpty else { return }
+            self.shots = depiction.screenshots
             self.rebuild()
         }
     }
@@ -291,11 +302,65 @@ final class ProductController: BlockPageController {
     }
 }
 
-// MARK: - Account (updates + sources)
+// MARK: - Source page
 
-/// The App Store keeps updates and account settings behind the profile button; Pantry does the same, plus sources.
+/// One source: its banners, its payment sign-in prompt, a few packages, and Remove.
+final class RepoController: BlockPageController {
+    override var hidesNavBar: Bool { false }
+    private let repo: Repo
+
+    init(_ repo: Repo) {
+        self.repo = repo
+        super.init(nibName: nil, bundle: nil)
+        title = Store.shared.host(of: repo)
+        navigationItem.largeTitleDisplayMode = .never
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func rebuild() {
+        let store = Store.shared
+        var blocks: [BlockView] = [HeaderBlock(title: store.host(of: repo), avatar: false)]
+        if let st = store.status[repo.id] {
+            blocks.append(SectionHeaderBlock(title: st.error == nil ? "\(st.count) packages" : "Couldn't load this source",
+                                             subtitle: st.error))
+        }
+        let banners = store.banners[repo.id] ?? []
+        if !banners.isEmpty { blocks.append(BannerStripBlock(banners)) }
+        if let provider = PaymentManager.shared.providers[repo.id], !PaymentManager.shared.isSignedIn(provider),
+           let message = provider.bannerMessage {
+            blocks.append(PaymentBannerBlock(provider, message: message))
+        }
+        let pkgs = store.index.allLatest.filter { $0.repoID == repo.id }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        if !pkgs.isEmpty {
+            blocks.append(SectionHeaderBlock(title: "Packages", seeAll: { [weak self] in
+                self?.navigationController?.pushViewController(ListController(self?.title ?? "Packages", pkgs), animated: true)
+            }))
+            blocks.append(RowShelfBlock(Array(pkgs.prefix(12))))
+        }
+        blocks.append(ButtonBlock(title: "Remove Source", destructive: true) { [weak self] in self?.confirmRemove() })
+        scroll.blocks = blocks
+    }
+
+    private func confirmRemove() {
+        let alert = UIAlertController(title: "Remove \(Store.shared.host(of: repo))?", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+            guard let self = self else { return }
+            Store.shared.removeRepo(id: self.repo.id)
+            self.navigationController?.popViewController(animated: true)
+        })
+        present(alert, animated: true)
+    }
+}
+
+// MARK: - Account (updates, sources, payment providers)
+
+/// The App Store keeps updates and account settings behind the profile button; Pantry does the same,
+/// plus sources and payment providers (like Sileo's settings).
 final class AccountController: UITableViewController {
     private var updates: [Package] = []
+    private var providers: [PaymentProvider] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -304,6 +369,7 @@ final class AccountController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "plain")
         tableView.register(RowCell.self, forCellReuseIdentifier: "row")
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .storeChanged, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: .paymentChanged, object: nil)
         reload()
     }
 
@@ -315,14 +381,15 @@ final class AccountController: UITableViewController {
             guard let latest = store.index.latest(id), latest.version > have else { return nil }
             return latest
         }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+        providers = PaymentManager.shared.uniqueProviders
         tableView.reloadData()
     }
 
-    // Sections: 0 updates, 1 sources, 2 about
-    override func numberOfSections(in tableView: UITableView) -> Int { 3 }
+    // Sections: 0 updates, 1 sources, 2 payment providers, 3 about
+    override func numberOfSections(in tableView: UITableView) -> Int { 4 }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        ["Updates", "Sources", "About"][section]
+        ["Updates", "Sources", "Payment Providers", "About"][section]
     }
 
     private var updateRowCount: Int { updates.isEmpty ? 1 : updates.count + (updates.count > 1 ? 1 : 0) }
@@ -331,13 +398,14 @@ final class AccountController: UITableViewController {
         switch section {
         case 0: return updateRowCount
         case 1: return Store.shared.repos.count + 1
+        case 2: return max(providers.count, 1)
         default: return 3
         }
     }
 
     override func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
         if indexPath.section == 0, !updates.isEmpty, !(updates.count > 1 && indexPath.row == 0) { return PackageRowView.height }
-        return 48
+        return 52
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
@@ -377,10 +445,32 @@ final class AccountController: UITableViewController {
                     cell.detailTextLabel?.text = store.isLoading ? "Loading…" : "Not loaded yet"
                     cell.detailTextLabel?.textColor = Theme.secondaryText
                 }
-                cell.selectionStyle = .none
+                cell.accessoryType = .disclosureIndicator
             } else {
                 cell.textLabel?.text = "Add Source\u{2026}"
                 cell.textLabel?.textColor = Theme.accent
+            }
+            return cell
+        case 2:
+            let cell = UITableViewCell(style: .subtitle, reuseIdentifier: nil)
+            if providers.isEmpty {
+                cell.textLabel?.text = "None found"
+                cell.textLabel?.textColor = Theme.secondaryText
+                cell.detailTextLabel?.text = "Sources that sell tweaks list their payment provider here."
+                cell.detailTextLabel?.textColor = Theme.secondaryText
+                cell.selectionStyle = .none
+            } else {
+                let p = providers[indexPath.row]
+                cell.textLabel?.text = p.name
+                if PaymentManager.shared.isSignedIn(p) {
+                    let name = PaymentManager.shared.signedInName(p)
+                    cell.detailTextLabel?.text = name.map { "Signed in as \($0)" } ?? "Signed in"
+                    cell.detailTextLabel?.textColor = Theme.accent
+                } else {
+                    cell.detailTextLabel?.text = p.details.isEmpty ? "Sign in to buy and download" : p.details
+                    cell.detailTextLabel?.textColor = Theme.secondaryText
+                }
+                cell.accessoryType = .disclosureIndicator
             }
             return cell
         default:
@@ -403,10 +493,29 @@ final class AccountController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        if indexPath.section == 0, updates.count > 1, indexPath.row == 0 {
-            InstallFlow.updateAll(updates, from: self)
-        } else if indexPath.section == 1, indexPath.row == Store.shared.repos.count {
-            promptAddSource()
+        let store = Store.shared
+        switch indexPath.section {
+        case 0:
+            if updates.count > 1, indexPath.row == 0 { InstallFlow.updateAll(updates, from: self) }
+        case 1:
+            if indexPath.row < store.repos.count {
+                navigationController?.pushViewController(RepoController(store.repos[indexPath.row]), animated: true)
+            } else {
+                promptAddSource()
+            }
+        case 2:
+            guard !providers.isEmpty else { return }
+            let p = providers[indexPath.row]
+            if PaymentManager.shared.isSignedIn(p) {
+                let sheet = UIAlertController(title: p.name, message: "Sign out of this payment provider?", preferredStyle: .alert)
+                sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+                sheet.addAction(UIAlertAction(title: "Sign Out", style: .destructive) { _ in PaymentManager.shared.signOut(p) })
+                present(sheet, animated: true)
+            } else {
+                PaymentManager.shared.signIn(p, from: self) { _ in }
+            }
+        default:
+            break
         }
     }
 

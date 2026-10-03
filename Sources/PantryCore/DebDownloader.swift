@@ -28,9 +28,11 @@ public final class DebDownloader {
     }
 
     /// `progress` reports 0...1 for this one download (Apple platforms only).
-    public func download(_ pkg: Package, from repo: Repo, progress: ((Double) -> Void)? = nil,
+    /// `urlOverride` replaces the repo's download link (paid packages: the payment provider issues a one-time URL).
+    public func download(_ pkg: Package, from repo: Repo, urlOverride: URL? = nil, progress: ((Double) -> Void)? = nil,
                          completion: @escaping (Result<URL, Error>) -> Void) {
-        guard !pkg.filename.isEmpty, let url = URL(string: pkg.filename, relativeTo: repo.url)?.absoluteURL else {
+        let resolved = urlOverride ?? (pkg.filename.isEmpty ? nil : URL(string: pkg.filename, relativeTo: repo.url)?.absoluteURL)
+        guard let url = resolved else {
             completion(.failure(DownloadError.badURL)); return
         }
         let safeVersion = pkg.version.raw.replacingOccurrences(of: ":", with: "%3a")

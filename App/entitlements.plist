@@ -8,5 +8,13 @@
     <true/>
     <key>com.apple.private.security.no-sandbox</key>
     <true/>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>com.foobtech.pantry</string>
+    </array>
+    <key>com.apple.private.MobileGestalt.AllowedProtectedKeys</key>
+    <array>
+        <string>UniqueDeviceID</string>
+    </array>
 </dict>
 </plist>

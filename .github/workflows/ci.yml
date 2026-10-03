@@ -39,13 +39,13 @@ jobs:
       - name: Install tools
         run: brew install dpkg ldid
 
-      - name: Build helper .deb
+      - name: Build helper .debs (rootless and rootful)
         run: bash packaging/build-helper-deb.sh
 
-      - name: Upload .deb
+      - name: Upload .debs
         uses: actions/upload-artifact@v4
         with:
-          name: pantry-helper-deb
+          name: pantry-helper-debs
           path: build/*.deb
 
   app-deb:
@@ -56,11 +56,11 @@ jobs:
       - name: Install tools
         run: brew install xcodegen ldid dpkg
 
-      - name: Build app .deb
+      - name: Build app .debs (rootless and rootful)
         run: bash packaging/build-app-deb.sh
 
-      - name: Upload .deb
+      - name: Upload .debs
         uses: actions/upload-artifact@v4
         with:
-          name: pantry-app-deb
+          name: pantry-app-debs
           path: build/*.deb

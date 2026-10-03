@@ -719,3 +719,132 @@ final class InfoBlock: BlockView {
         }
     }
 }
+
+// MARK: - Source page
+
+/// A repo's featured banners (16:9), side by side. Tapping one opens its package.
+final class BannerStripBlock: BlockView {
+    private let scroll = UIScrollView()
+    private var views: [UIImageView] = []
+    private let packageIDs: [String]
+
+    init(_ banners: [Banner]) {
+        packageIDs = banners.map { $0.packageID }
+        super.init(frame: .zero)
+        scroll.showsHorizontalScrollIndicator = false
+        addSubview(scroll)
+        for (i, b) in banners.enumerated() {
+            let iv = UIImageView()
+            iv.contentMode = .scaleAspectFill
+            iv.clipsToBounds = true
+            iv.layer.cornerRadius = 14
+            iv.backgroundColor = Theme.fill
+            iv.isUserInteractionEnabled = true
+            iv.tag = i
+            iv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
+            scroll.addSubview(iv)
+            views.append(iv)
+            ImageLoader.load(b.imageURL) { [weak iv] in iv?.image = $0 }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private func bannerWidth(_ w: CGFloat) -> CGFloat { min(max(w * 0.78, 260), 460) }
+
+    override func height(forWidth width: CGFloat) -> CGFloat { bannerWidth(width) * 9 / 16 + 4 }
+
+    @objc private func tapped(_ g: UITapGestureRecognizer) {
+        guard let tag = g.view?.tag, tag < packageIDs.count,
+              let pkg = Store.shared.index.latest(packageIDs[tag]) else { return }
+        owningViewController?.navigationController?.pushViewController(ProductController(pkg), animated: true)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        scroll.frame = bounds
+        let w = bounds.width, m = sideMargin(for: w), gap: CGFloat = 12, bw = bannerWidth(w)
+        for (i, v) in views.enumerated() {
+            v.frame = CGRect(x: m + CGFloat(i) * (bw + gap), y: 0, width: bw, height: bw * 9 / 16)
+        }
+        scroll.contentSize = CGSize(width: 2 * m + CGFloat(views.count) * bw + CGFloat(max(0, views.count - 1)) * gap,
+                                    height: bounds.height)
+    }
+}
+
+/// The payment provider's "sign in" prompt, shown on a source's page to signed-out users.
+final class PaymentBannerBlock: BlockView {
+    private let card = UIView()
+    private let label = UILabel()
+    private let button = UIButton(type: .system)
+    private let provider: PaymentProvider
+
+    init(_ provider: PaymentProvider, message: String) {
+        self.provider = provider
+        super.init(frame: .zero)
+        card.backgroundColor = Theme.secondaryBackground
+        card.layer.cornerRadius = 16
+        label.text = message
+        label.numberOfLines = 0
+        label.font = .systemFont(ofSize: 15)
+        label.textColor = Theme.label
+        button.setTitle((provider.bannerButton ?? "Sign in").uppercased(), for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
+        button.setTitleColor(.white, for: .normal)
+        button.backgroundColor = Theme.accent
+        button.layer.cornerRadius = 15
+        button.addTarget(self, action: #selector(signIn), for: .touchUpInside)
+        addSubview(card)
+        card.addSubview(label)
+        card.addSubview(button)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func signIn() {
+        PaymentManager.shared.signIn(provider, from: owningViewController) { _ in }
+    }
+
+    override func height(forWidth width: CGFloat) -> CGFloat {
+        let m = sideMargin(for: width)
+        return textHeight(label.text ?? "", font: label.font, width: width - 2 * m - 32) + 32 + 44 + 12
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let m = sideMargin(for: bounds.width)
+        card.frame = CGRect(x: m, y: 0, width: bounds.width - 2 * m, height: bounds.height)
+        let lh = textHeight(label.text ?? "", font: label.font, width: card.bounds.width - 32)
+        label.frame = CGRect(x: 16, y: 16, width: card.bounds.width - 32, height: lh)
+        let bw = max(96, button.sizeThatFits(.zero).width + 32)
+        button.frame = CGRect(x: 16, y: 16 + lh + 12, width: bw, height: 32)
+    }
+}
+
+final class ButtonBlock: BlockView {
+    private let button = UIButton(type: .system)
+    private let action: () -> Void
+
+    init(title: String, destructive: Bool = false, action: @escaping () -> Void) {
+        self.action = action
+        super.init(frame: .zero)
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 17)
+        if destructive { button.setTitleColor(.red, for: .normal) }
+        button.addTarget(self, action: #selector(tapped), for: .touchUpInside)
+        addSubview(button)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    @objc private func tapped() { action() }
+
+    override func height(forWidth width: CGFloat) -> CGFloat { 52 }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let m = sideMargin(for: bounds.width)
+        button.frame = CGRect(x: m, y: 0, width: bounds.width - 2 * m, height: 52)
+        button.contentHorizontalAlignment = .left
+    }
+}

@@ -19,6 +19,8 @@ public final class InstallQueue {
     private let runner: PrivilegedRunner
     private let queue = DispatchQueue(label: "com.foobtech.pantry.install")
     public var onEvent: ((InstallEvent) -> Void)?
+    /// Lets the app swap a package's download URL right before it is fetched (paid packages).
+    public var urlResolver: ((Package, @escaping (Result<URL?, Error>) -> Void) -> Void)?
 
     public init(downloader: DebDownloader, runner: PrivilegedRunner) {
         self.downloader = downloader
@@ -47,9 +49,20 @@ public final class InstallQueue {
                     self.emit(.failed("\(pkg.name): its source was removed")); return
                 }
                 self.emit(.downloading(pkg))
+                var override: URL?
+                if let resolver = self.urlResolver {
+                    let resolveWait = DispatchSemaphore(value: 0)
+                    var resolved: Result<URL?, Error> = .success(nil)
+                    resolver(pkg) { resolved = $0; resolveWait.signal() }
+                    resolveWait.wait()
+                    switch resolved {
+                    case .success(let url): override = url
+                    case .failure(let error): self.emit(.failed("\(pkg.name): \(describe(error))")); return
+                    }
+                }
                 let sem = DispatchSemaphore(value: 0)
                 var outcome: Result<URL, Error> = .failure(DownloadError.badURL)
-                self.downloader.download(pkg, from: repo, progress: { f in
+                self.downloader.download(pkg, from: repo, urlOverride: override, progress: { f in
                     report((Double(i) + f) / Double(2 * n))
                 }, completion: { outcome = $0; sem.signal() })
                 sem.wait()

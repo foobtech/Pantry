@@ -1,8 +1,9 @@
 import UIKit
 
 extension Notification.Name {
-    static let storeChanged = Notification.Name("PantryStoreChanged")     // packages, repos, or installed set changed
-    static let stateChanged = Notification.Name("PantryStateChanged")     // install progress changed
+    static let storeChanged = Notification.Name("PantryStoreChanged")     // packages, repos, banners or installed set changed
+    static let stateChanged = Notification.Name("PantryStateChanged")     // install progress or prices changed
+    static let paymentChanged = Notification.Name("PantryPaymentChanged") // a payment provider appeared or sign-in changed
     static let installFailed = Notification.Name("PantryInstallFailed")
 }
 
@@ -24,7 +25,7 @@ struct RepoStatus {
 
 enum AddRepoResult { case added, invalid, duplicate }
 
-/// App-wide state: sources, the package index, what's installed, and install progress.
+/// App-wide state: sources, the package index, banners, what's installed, and install progress.
 final class Store {
     static let shared = Store()
 
@@ -36,6 +37,8 @@ final class Store {
     private(set) var installed = InstalledDatabase()
     private(set) var isLoading = false
     private(set) var progress: [String: Double] = [:]
+    private(set) var banners: [String: [Banner]] = [:]          // by repo id
+    private(set) var bannerByPackage: [String: Banner] = [:]    // by package identifier
 
     private var packages: [Package] = []
     private var needsRefresh = false
@@ -49,23 +52,35 @@ final class Store {
         repos = loadRepos()
         for r in repos { repoByID[r.id] = r }
         queue.onEvent = { [weak self] event in self?.handle(event) }
+        // Paid packages: the payment provider issues the download link.
+        queue.urlResolver = { pkg, done in
+            DispatchQueue.main.async {
+                guard pkg.isPaid, PaymentManager.shared.provider(for: pkg) != nil else { done(.success(nil)); return }
+                PaymentManager.shared.authorizeDownload(pkg) { result in done(result.map { Optional($0) }) }
+            }
+        }
     }
 
     // MARK: Sources
 
-    static func defaultRepos() -> [Repo] {
-        // Procursus suites are numbered by CoreFoundation version: iOS 15 = 1800, 16 = 1900, 17 = 2000.
+    static func defaultRepos(scheme: JailbreakScheme) -> [Repo] {
+        // Procursus suites are numbered by CoreFoundation version: iOS 12 = 1500, 15 = 1800, 16 = 1900, 17 = 2000.
         let cf = ProcessInfo.processInfo.operatingSystemVersion.majorVersion * 100 + 300
-        return [
-            Repo(url: URL(string: "https://apt.procurs.us/")!, suite: "\(cf)", components: ["main"]),
-            Repo(url: URL(string: "https://repo.chariz.com/")!),
-        ]
+        var list: [Repo] = []
+        switch scheme {
+        case .rootful:
+            list.append(Repo(url: URL(string: "https://apt.procurs.us/")!, suite: "iphoneos-arm/\(cf)", components: ["main"]))
+        case .rootless, .roothide:
+            list.append(Repo(url: URL(string: "https://apt.procurs.us/")!, suite: "\(cf)", components: ["main"]))
+        }
+        list.append(Repo(url: URL(string: "https://repo.chariz.com/")!))
+        return list
     }
 
     private func loadRepos() -> [Repo] {
         if let data = UserDefaults.standard.data(forKey: defaultsKey),
            let saved = try? JSONDecoder().decode([Repo].self, from: data) { return saved }
-        return Store.defaultRepos()
+        return Store.defaultRepos(scheme: device.scheme)
     }
 
     private func saveRepos() {
@@ -99,6 +114,8 @@ final class Store {
         repos.removeAll { $0.id == id }
         repoByID[id] = nil
         status[id] = nil
+        banners[id] = nil
+        rebuildBannerMap()
         packages.removeAll { $0.repoID == id }
         saveRepos()
         rebuildIndex()
@@ -143,7 +160,27 @@ final class Store {
             self.rebuildIndex()
             self.isLoading = false
             self.notifyData()
+            self.loadBanners()
+            PaymentManager.shared.discover(repos: self.repos)
             if self.needsRefresh { self.needsRefresh = false; self.refresh() }
+        }
+    }
+
+    private func loadBanners() {
+        for repo in repos {
+            FeaturedLoader.load(repo) { [weak self] list in
+                guard let self = self, self.repoByID[repo.id] != nil else { return }
+                self.banners[repo.id] = list
+                self.rebuildBannerMap()
+                if !list.isEmpty { self.notifyData() }
+            }
+        }
+    }
+
+    private func rebuildBannerMap() {
+        bannerByPackage = [:]
+        for repo in repos {
+            for b in banners[repo.id] ?? [] where bannerByPackage[b.packageID] == nil { bannerByPackage[b.packageID] = b }
         }
     }
 
@@ -156,6 +193,22 @@ final class Store {
 
     func packages(in category: Category) -> [Package] {
         index.allLatest.filter { Category.of($0) == category }
+    }
+
+    /// Packages the repos feature with banner art, in repo order, that this device can use.
+    func featuredPackages() -> [Package] {
+        var seen = Set<String>()
+        var out: [Package] = []
+        for repo in repos {
+            for b in banners[repo.id] ?? [] where seen.insert(b.packageID).inserted {
+                if let p = index.latest(b.packageID) { out.append(p) }
+            }
+        }
+        return out
+    }
+
+    func featuredPackages(in category: Category) -> [Package] {
+        featuredPackages().filter { Category.of($0) == category }
     }
 
     /// A different, stable-for-the-day selection; packages with icons come first.
@@ -179,8 +232,17 @@ final class Store {
 
     func state(for pkg: Package) -> GetState {
         if let p = progress[pkg.identifier] { return .working(p) }
-        guard let have = installed.version(of: pkg.identifier) else { return .get }
-        return have < pkg.version ? .update : .installed
+        if let have = installed.version(of: pkg.identifier) { return have < pkg.version ? .update : .installed }
+        if pkg.isPaid {
+            let pay = PaymentManager.shared
+            if pay.provider(for: pkg) != nil {
+                guard let info = pay.info(for: pkg) else { return .price("…") }
+                if info.purchased { return .get }
+                return .price(info.price ?? (info.available ? "BUY" : "N/A"))
+            }
+            if !pay.isDiscovered(pkg.repoID) { return .price("…") }
+        }
+        return .get
     }
 
     func beginInstall(_ plan: InstallPlan) {
@@ -226,6 +288,10 @@ enum InstallFlow {
     }
 
     static func install(_ pkg: Package, from vc: UIViewController?) {
+        if PaymentManager.shared.needsPurchase(pkg) {
+            PaymentManager.shared.purchase(pkg, from: vc)
+            return
+        }
         let store = Store.shared
         let plan = Resolver.plan(installing: pkg, index: store.index, installed: store.installed)
         guard plan.isInstallable else {

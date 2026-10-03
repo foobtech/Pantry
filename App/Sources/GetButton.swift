@@ -2,13 +2,13 @@ import UIKit
 
 enum GetState: Equatable {
     case get, update, installed
+    case price(String)     // paid package not bought yet
     case working(Double)   // 0...1
 }
 
-/// The App Store's pill: GET / UPDATE / INSTALLED, turning into a progress ring while working.
+/// The App Store's pill: GET / UPDATE / INSTALLED / price, turning into a progress ring while working.
 final class GetButton: UIControl {
     static let size = CGSize(width: 72, height: 28)
-    private static let font = UIFont.systemFont(ofSize: 12, weight: .bold)
 
     private let label = UILabel()
     private let track = CAShapeLayer()
@@ -20,7 +20,6 @@ final class GetButton: UIControl {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        label.font = GetButton.font
         label.textAlignment = .center
         addSubview(label)
         for l in [track, ring] {
@@ -35,16 +34,21 @@ final class GetButton: UIControl {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private func spec() -> (text: String, font: UIFont) {
+        switch buttonState {
+        case .get: return ("GET", .systemFont(ofSize: 15, weight: .bold))
+        case .update: return ("UPDATE", .systemFont(ofSize: 14, weight: .bold))
+        case .installed: return ("INSTALLED", .systemFont(ofSize: 12, weight: .bold))
+        case .price(let p): return (p, .systemFont(ofSize: 14, weight: .bold))
+        case .working: return ("", .systemFont(ofSize: 12, weight: .bold))
+        }
+    }
+
     /// GET stays compact like the App Store; longer words get just enough room.
     var preferredWidth: CGFloat {
-        func fit(_ text: String) -> CGFloat {
-            max(GetButton.size.width, ceil((text as NSString).size(withAttributes: [.font: GetButton.font]).width) + 24)
-        }
-        switch buttonState {
-        case .installed: return fit("INSTALLED")
-        case .update: return fit("UPDATE")
-        default: return GetButton.size.width
-        }
+        if case .working = buttonState { return GetButton.size.width }
+        let s = spec()
+        return max(GetButton.size.width, ceil((s.text as NSString).size(withAttributes: [.font: s.font]).width) + 24)
     }
 
     override var intrinsicContentSize: CGSize { CGSize(width: preferredWidth, height: GetButton.size.height) }
@@ -68,12 +72,9 @@ final class GetButton: UIControl {
         ring.isHidden = !working
         backgroundColor = working ? .clear : (onDark ? UIColor(white: 1, alpha: 0.28) : Theme.fill)
 
-        switch buttonState {
-        case .get: label.text = "GET"
-        case .update: label.text = "UPDATE"
-        case .installed: label.text = "INSTALLED"
-        case .working: break
-        }
+        let s = spec()
+        label.text = s.text
+        label.font = s.font
         let tint = onDark ? UIColor.white : Theme.accent
         if buttonState == .installed {
             label.textColor = onDark ? UIColor(white: 1, alpha: 0.75) : Theme.secondaryText
@@ -111,6 +112,9 @@ final class GetButton: UIControl {
     }
 
     @objc private func tapped() {
-        if buttonState == .get || buttonState == .update { onTap?() }
+        switch buttonState {
+        case .get, .update, .price: onTap?()
+        case .installed, .working: break
+        }
     }
 }

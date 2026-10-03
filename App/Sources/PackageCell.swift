@@ -104,6 +104,8 @@ final class FeatureCardView: UIView {
     private let titleLabel = UILabel()
     private let subtitleLabel = UILabel()
     private let art = GradientView()
+    private let bannerView = UIImageView()
+    private let scrim = GradientView()
     private let bigIcon = UIImageView()
     private let bar = UIView()
     private let smallIcon = UIImageView()
@@ -122,6 +124,15 @@ final class FeatureCardView: UIView {
         art.layer.cornerRadius = 20
         art.clipsToBounds = true
         addSubview(art)
+        // Banner art (from the repo's featured list or the package's depiction) sits under the text, over the gradient.
+        bannerView.contentMode = .scaleAspectFill
+        bannerView.clipsToBounds = true
+        bannerView.isHidden = true
+        art.addSubview(bannerView)
+        scrim.gradient.colors = [UIColor(white: 0, alpha: 0).cgColor, UIColor(white: 0, alpha: 0.55).cgColor]
+        scrim.isUserInteractionEnabled = false
+        scrim.isHidden = true
+        art.addSubview(scrim)
 
         let textParent: UIView = style == .above ? self : art
         let onArt = style == .inside
@@ -171,11 +182,24 @@ final class FeatureCardView: UIView {
         NotificationCenter.default.addObserver(self, selector: #selector(refreshState), name: .stateChanged, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshState), name: .storeChanged, object: nil)
         refreshState()
+        CardArtLoader.art(for: pkg) { [weak self] found in self?.applyArt(found) }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     @objc private func refreshState() { button.set(Store.shared.state(for: pkg)) }
+
+    private func applyArt(_ found: CardArt) {
+        if let tint = found.tint { art.gradient.colors = Theme.gradientColors(from: tint) }
+        guard let url = found.bannerURL else { return }
+        ImageLoader.load(url) { [weak self] image in
+            guard let self = self, let image = image else { return }
+            self.bannerView.image = image
+            self.bannerView.isHidden = false
+            self.scrim.isHidden = false
+            self.bigIcon.isHidden = true
+        }
+    }
 
     @objc private func openProduct() {
         owningViewController?.navigationController?.pushViewController(ProductController(pkg), animated: true)
@@ -195,6 +219,8 @@ final class FeatureCardView: UIView {
             labelLabel.frame = CGRect(x: 20, y: 18, width: w - 40, height: 16)
         }
         let aw = art.bounds.width, ah = art.bounds.height
+        bannerView.frame = art.bounds
+        scrim.frame = art.bounds
         bar.frame = CGRect(x: 0, y: ah - 68, width: aw, height: 68)
 
         let reserved: CGFloat = style == .inside ? 150 : 50

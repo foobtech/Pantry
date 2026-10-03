@@ -1,7 +1,8 @@
 import UIKit
 
 enum Theme {
-    static let accent = UIColor(red: 0.04, green: 0.52, blue: 1.0, alpha: 1)
+    /// The one accent colour (purple-pink, #CC4DE0). Change it here and the whole app follows.
+    static let accent = UIColor(red: 0.80, green: 0.30, blue: 0.88, alpha: 1)
 
     static var background: UIColor {
         if #available(iOS 13.0, *) { return .systemBackground }
@@ -39,6 +40,15 @@ enum Theme {
         let hue = CGFloat(hash(key) % 360) / 360
         let top = UIColor(hue: hue, saturation: 0.45, brightness: 0.85, alpha: 1)
         let bottom = UIColor(hue: hue, saturation: 0.75, brightness: 0.42, alpha: 1)
+        return [top.cgColor, bottom.cgColor]
+    }
+
+    /// Card artwork from a tint colour (a depiction's `tintColor`).
+    static func gradientColors(from tint: UIColor) -> [CGColor] {
+        var h: CGFloat = 0, sat: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        tint.getHue(&h, saturation: &sat, brightness: &b, alpha: &a)
+        let top = UIColor(hue: h, saturation: min(sat, 0.55), brightness: 0.9, alpha: 1)
+        let bottom = UIColor(hue: h, saturation: min(max(sat, 0.6), 0.85), brightness: 0.45, alpha: 1)
         return [top.cgColor, bottom.cgColor]
     }
 
@@ -101,4 +111,17 @@ func textHeight(_ text: String, font: UIFont, width: CGFloat, maxLines: Int = 0)
     var h = ceil(rect.height)
     if maxLines > 0 { h = min(h, ceil(font.lineHeight) * CGFloat(maxLines)) }
     return h
+}
+
+extension UIColor {
+    /// "#RGB" or "#RRGGBB", the forms depictions use for tintColor.
+    convenience init?(css: String) {
+        var s = css.trimmingCharacters(in: .whitespaces)
+        guard s.hasPrefix("#") else { return nil }
+        s.removeFirst()
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, let v = UInt32(s, radix: 16) else { return nil }
+        self.init(red: CGFloat((v >> 16) & 0xff) / 255, green: CGFloat((v >> 8) & 0xff) / 255,
+                  blue: CGFloat(v & 0xff) / 255, alpha: 1)
+    }
 }
